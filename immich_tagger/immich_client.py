@@ -1,665 +1,208 @@
-"""
-Immich API client for interacting with the Immich instance.
-"""
-
+"""Immich API adapter with scoped searches and explicit write boundaries."""
+import logging
 import time
-from typing import List, Optional, Dict, Any
+from collections.abc import Iterator
+
 import httpx
-from .models import Asset, Tag, BulkTagRequest, CreateTagRequest
-from .config import settings
-from .logging import get_logger
-from .performance_monitor import performance_monitor
+from .config import Settings, get_settings
+from .models import Asset, Tag
 
 
-class ImmichAPIError(Exception):
-    """Custom exception for Immich API errors."""
-    pass
+class ImmichAPIError(RuntimeError):
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ImmichClient:
-    """Client for interacting with the Immich API with multi-library support."""
-    
-    def __init__(self):
-        self.base_url = settings.immich_base_url
-        self.logger = get_logger("immich_client")
-        self.timeout = settings.request_timeout
-        self.max_retries = settings.max_retries
-        self.retry_delay = settings.retry_delay
-        
-        # Multi-library support
-        self.library_configs = settings.get_library_config()
-        self.current_library_index = 0
-        self.current_library = self.library_configs[0] if self.library_configs else {"name": "Unknown", "api_key": ""}
-        
-        # Per-library tag caching
-        self._tag_caches: Dict[str, Dict[str, Tag]] = {
-            lib['api_key']: {} for lib in self.library_configs
-        }
-        self._tag_cache_valid: Dict[str, bool] = {
-            lib['api_key']: False for lib in self.library_configs
-        }
-        self._tag_cache_timestamp: Dict[str, float] = {
-            lib['api_key']: 0 for lib in self.library_configs
-        }
-        
-        self.logger.info(f"🏛️ Initialized with {len(self.library_configs)} libraries: {[lib['name'] for lib in self.library_configs]}")
-        
-        # Initialize HTTP client
-        self._setup_http_client()
-    
-    @property
-    def api_key(self):
-        """Get current API key for backward compatibility."""
-        return self.current_library["api_key"]
-    
-    @property
-    def current_library_name(self):
-        """Get current library name."""
-        return self.current_library["name"]
-    
-    @property
-    def _tag_cache(self):
-        """Get tag cache for current library."""
-        return self._tag_caches.get(self.api_key, {})
-    
-    @_tag_cache.setter
-    def _tag_cache(self, value):
-        """Set tag cache for current library."""
-        self._tag_caches[self.api_key] = value
-    
-    def switch_to_library(self, library_index: int):
-        """Switch to a specific library by index."""
-        if 0 <= library_index < len(self.library_configs):
-            old_name = self.current_library_name
-            self.current_library_index = library_index
-            self.current_library = self.library_configs[library_index]
-            
-            # Update HTTP client headers with new API key
-            if hasattr(self, 'client'):
-                self.client.headers["X-API-Key"] = self.api_key
-            
-            # Only log if actually switching to a different library
-            if old_name != self.current_library_name:
-                self.logger.info(f"🔄 Switched from '{old_name}' to '{self.current_library_name}' ({library_index + 1}/{len(self.library_configs)})")
-        else:
-            raise ValueError(f"Invalid library index: {library_index}")
-    
-    def _switch_to_library_silent(self, library_index: int):
-        """Switch to a specific library by index without logging."""
-        if 0 <= library_index < len(self.library_configs):
-            self.current_library_index = library_index
-            self.current_library = self.library_configs[library_index]
-            
-            # Update HTTP client headers with new API key
-            if hasattr(self, 'client'):
-                self.client.headers["X-API-Key"] = self.api_key
-        else:
-            raise ValueError(f"Invalid library index: {library_index}")
-    
-    def switch_to_next_library(self):
-        """Switch to the next library in rotation."""
-        next_index = (self.current_library_index + 1) % len(self.library_configs)
-        self.switch_to_library(next_index)
-    
-    def get_current_user_info(self) -> Dict:
-        """Get information about the current user for logging context."""
-        try:
-            response = self._make_request(
-                method="GET",
-                endpoint="/api/users/me"
-            )
-            
-            if response.status_code == 200:
-                user_data = response.json()
-                return {
-                    "id": user_data.get("id", "unknown"),
-                    "name": user_data.get("name", "Unknown User"),
-                    "email": user_data.get("email", "unknown@example.com")
-                }
-        except Exception as e:
-            self.logger.debug(f"Failed to get user info: {e}")
-        
-        return {"id": "unknown", "name": "Unknown User", "email": "unknown@example.com"}
-    
-    def _get_cache_properties(self):
-        """Get cache properties for current library."""
-        api_key = self.api_key
-        return {
-            'valid': self._tag_cache_valid.get(api_key, False),
-            'timestamp': self._tag_cache_timestamp.get(api_key, 0),
-            'ttl': settings.tag_cache_ttl
-        }
-    
-    def _set_cache_properties(self, valid: bool, timestamp: float = None):
-        """Set cache properties for current library."""
-        api_key = self.api_key
-        self._tag_cache_valid[api_key] = valid
-        if timestamp is not None:
-            self._tag_cache_timestamp[api_key] = timestamp
-    
-    def _setup_http_client(self):
-        """Setup HTTP client with current library's API key."""
-        # HTTP client with retry logic
+    def __init__(self, settings: Settings | None = None, account=None, *, dry_run=False, transport=None):
+        self.settings = settings or get_settings()
+        self.account = account or self.settings.get_library_config()[0]
+        self.current_library_name = self.account["name"]
+        self.base_url = self.settings.immich_base_url
+        self.dry_run = dry_run
+        self.logger = logging.getLogger("immich_client")
         self.client = httpx.Client(
-            timeout=self.timeout,
-            headers={
-                "X-API-Key": self.api_key,
-                "Content-Type": "application/json",
-            }
+            base_url=self.base_url,
+            headers={"X-API-Key": self.account["api_key"]},
+            timeout=self.settings.request_timeout,
+            transport=transport,
         )
-        self._cache_ttl = settings.tag_cache_ttl
-        
-        # Silence httpx request logging
-        import logging
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-    
-    def _make_request(
-        self, 
-        method: str, 
-        endpoint: str, 
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None
-    ) -> Any:
-        """Make an HTTP request with retry logic."""
-        url = f"{self.base_url}{endpoint}"
-        request_start = time.time()
-        
-        for attempt in range(self.max_retries + 1):
+        self._tag_cache: dict[str, Tag] = {}
+        self._cache_time = None
+        self._search_api = self.settings.search_api
+
+    def _make_request(self, method, endpoint, params=None, json_data=None):
+        if self.dry_run and method not in ("GET", "HEAD") and endpoint != "/api/search/metadata":
+            raise ImmichAPIError("Dry run forbids Immich writes")
+        for attempt in range(self.settings.max_retries + 1):
             try:
-                response = self.client.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    json=json_data
-                )
-                response.raise_for_status()
-                
-                # Record successful API call
-                response_time = time.time() - request_start
-                performance_monitor.record_api_call(response_time)
-                
-                return response
-                
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code >= 500 and attempt < self.max_retries:
-                    self.logger.warning(
-                        f"⚠️  Server error {e.response.status_code}, retrying "
-                        f"(attempt {attempt + 1}/{self.max_retries})"
-                    )
-                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
-                    continue
-                else:
-                    self.logger.error(
-                        f"❌ HTTP {method} {url} failed: {e.response.status_code} - {e.response.text}"
-                    )
-                    raise ImmichAPIError(f"HTTP {e.response.status_code}: {e.response.text}")
-                    
-            except httpx.RequestError as e:
-                if attempt < self.max_retries:
-                    self.logger.warning(f"Request error, retrying (attempt {attempt + 1}/{self.max_retries}): {e}")
-                    time.sleep(self.retry_delay * (2 ** attempt))
-                    continue
-                else:
-                    self.logger.error(f"❌ Request failed: {str(e)}")
-                    raise ImmichAPIError(f"Request failed: {e}")
-    
-    def _make_request_silent(
-        self, 
-        method: str, 
-        endpoint: str, 
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None
-    ) -> Any:
-        """Make an HTTP request without logging (for health checks)."""
-        url = f"{self.base_url}{endpoint}"
-        
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = self.client.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    json=json_data
-                )
+                response = self.client.request(method, endpoint, params=params, json=json_data)
                 response.raise_for_status()
                 return response
-                
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code >= 500 and attempt < self.max_retries:
-                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
-                    continue
-                else:
-                    raise ImmichAPIError(f"HTTP {e.response.status_code}: {e.response.text}")
-                    
-            except httpx.RequestError as e:
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_delay * (2 ** attempt))
-                    continue
-                else:
-                    raise ImmichAPIError(f"Request failed: {e}")
-    
-    def get_untagged_assets(self) -> List[Asset]:
-        """Get image assets that have no tags using the metadata search endpoint.
-        
-        This endpoint naturally returns up to 250 assets at a time that don't have any tags.
-        As we tag assets with 'auto:processed', they disappear from this search automatically.
-        Only searches for IMAGE assets since WD14 cannot process videos.
-        
-        Returns:
-            List of untagged image assets (max 250 per call)
-        """
-        library_name = self.current_library_name
-        self.logger.debug(f"🔍 Library '{library_name}': Getting untagged image assets via metadata search")
-        
-        # Use the metadata search endpoint to find image assets without any tags
-        response = self._make_request(
-            method="POST",
-            endpoint="/api/search/metadata",
-            json_data={
-                "tagIds": None,  # null/None means "assets with no tags"
-                "type": "IMAGE"  # Only process images, not videos (WD14 can't process videos)
-            }
-        )
-        
-        response_data = response.json()
-        
-        # Metadata search returns: {"albums": {...}, "assets": {"items": [...], "total": N, "nextPage": "..."}}
-        if not isinstance(response_data, dict) or "assets" not in response_data:
-            self.logger.error(f"❌ Library '{library_name}': Unexpected metadata response structure: {list(response_data.keys()) if isinstance(response_data, dict) else type(response_data)}")
-            return []
-            
-        assets_section = response_data["assets"]
-        assets_list = assets_section.get("items", [])
-        total_available = assets_section.get("total", len(assets_list))
-        
-        self.logger.debug(f"📊 Library '{library_name}': Metadata search: {len(assets_list)} assets returned, {total_available} total available")
-        
-        # Parse assets
-        assets = []
-        for asset_data in assets_list:
-            try:
-                if isinstance(asset_data, dict):
-                    assets.append(Asset(**asset_data))
-                else:
-                    self.logger.debug(f"⚠️  Library '{library_name}': Skipping non-dict asset data: {type(asset_data)}")
-            except Exception as e:
-                self.logger.warning(f"⚠️  Library '{library_name}': Failed to parse asset: {e}")
-                continue
-        
-        self.logger.info(f"✅ Library '{library_name}': Found {len(assets)} untagged image assets (of {total_available} total available)")
-        return assets
-    
-    def get_unprocessed_assets(self, processed_tag_id: Optional[str] = None, limit: int = 250) -> List[Asset]:
-        """Get unprocessed assets - now simplified to use metadata search.
-        
-        Args:
-            processed_tag_id: Ignored - we use tagIds:null to get untagged assets
-            limit: Ignored - API returns natural batches of ~250
-            
-        Returns:
-            List of assets that have no tags (and thus need processing)
-        """
-        return self.get_untagged_assets()
-    
-    def download_asset(self, asset_id: str, use_thumbnail: bool = True) -> bytes:
-        """Download an asset (thumbnail or original)."""
-        endpoint = f"/api/assets/{asset_id}/{'thumbnail' if use_thumbnail else 'download'}"
-        
-        self.logger.debug("Downloading asset", asset_id=asset_id, use_thumbnail=use_thumbnail)
-        
-        url = f"{self.base_url}{endpoint}"
-        
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = self.client.get(url)
-                response.raise_for_status()
-                content = response.content
-                self.logger.debug("Asset downloaded", asset_id=asset_id, size=len(content))
-                return content
-                    
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code >= 500 and attempt < self.max_retries:
-                    self.logger.warning(
-                        f"⚠️  Server error {e.response.status_code}, retrying "
-                        f"(attempt {attempt + 1}/{self.max_retries})"
-                    )
-                    time.sleep(self.retry_delay * (2 ** attempt))
-                    continue
-                else:
-                    self.logger.error(
-                        "HTTP request failed",
-                        method="GET",
-                        url=url,
-                        status_code=e.response.status_code,
-                        response_text=e.response.text
-                    )
-                    raise ImmichAPIError(f"HTTP {e.response.status_code}: {e.response.text}")
-                    
-            except httpx.RequestError as e:
-                if attempt < self.max_retries:
-                    self.logger.warning(f"Request error, retrying (attempt {attempt + 1}/{self.max_retries}): {e}")
-                    time.sleep(self.retry_delay * (2 ** attempt))
-                    continue
-                else:
-                    self.logger.error(f"❌ Request failed: {str(e)}")
-                    raise ImmichAPIError(f"Request failed: {e}")
-    
-    def get_all_tags(self, use_cache: bool = True) -> List[Tag]:
-        """Get all tags from Immich with optional caching."""
-        current_time = time.time()
-        
-        # Check if cache is valid
-        cache_props = self._get_cache_properties()
-        if (use_cache and cache_props['valid'] and 
-            current_time - cache_props['timestamp'] < cache_props['ttl']):
-            self.logger.debug("Using cached tags", count=len(self._tag_cache))
+            except httpx.HTTPStatusError as error:
+                status = error.response.status_code
+                if status not in (429, 500, 502, 503, 504) or attempt == self.settings.max_retries:
+                    raise ImmichAPIError(f"{method} {endpoint}: HTTP {status}: {error.response.text[:500]}", status) from error
+                retry_after = error.response.headers.get("Retry-After", "")
+                delay = min(float(retry_after), 60) if retry_after.isdigit() else self.settings.retry_delay * 2 ** attempt
+            except httpx.RequestError as error:
+                if attempt == self.settings.max_retries:
+                    raise ImmichAPIError(f"{method} {endpoint}: {type(error).__name__}") from error
+                delay = self.settings.retry_delay * 2 ** attempt
+            time.sleep(min(delay, 60))
+        raise AssertionError("Unreachable")
+
+    def get_all_tags(self, use_cache=True):
+        if use_cache and self._cache_time is not None and time.monotonic() - self._cache_time < self.settings.tag_cache_ttl:
             return list(self._tag_cache.values())
-        
-        self.logger.debug("Fetching all tags from API")
-        
-        response = self._make_request(method="GET", endpoint="/api/tags")
-        tags_data = response.json()
-        tags = [Tag(**tag_data) for tag_data in tags_data]
-        
-        # Update cache
-        if use_cache:
-            self._tag_cache = {tag.name.lower(): tag for tag in tags}
-            self._set_cache_properties(valid=True, timestamp=current_time)
-            self.logger.debug("Updated tag cache", count=len(self._tag_cache))
-        
-        self.logger.debug("Fetched tags", count=len(tags))
+        data = self._make_request("GET", "/api/tags").json()
+        tags = [Tag.model_validate(item) for item in data]
+        self._tag_cache = {tag.path: tag for tag in tags}
+        self._cache_time = time.monotonic()
         return tags
-    
-    def create_tag(self, tag_request: CreateTagRequest) -> Tag:
-        """Create a new tag in Immich."""
-        self.logger.debug("Creating tag", name=tag_request.name)
-        
-        response = self._make_request(
-            method="POST",
-            endpoint="/api/tags",
-            json_data=tag_request.dict()
-        )
-        
-        tag_data = response.json()
-        tag = Tag(**tag_data)
-        
-        # Update cache immediately
-        self._tag_cache[tag.name.lower()] = tag
-        
-        self.logger.debug("Created tag", tag_id=tag.id, name=tag.name)
-        return tag
-    
-    def get_or_create_tag(self, tag_name: str) -> Tag:
-        """Get an existing tag or create it if it doesn't exist."""
-        # Validate tag name first
-        if not self._is_valid_tag_name(tag_name):
-            self.logger.debug(f"Skipping invalid tag name: '{tag_name}'")
-            raise ValueError(f"Invalid tag name: '{tag_name}'")
-        
-        tag_name_clean = tag_name.strip()
-        tag_name_lower = tag_name_clean.lower()
-        
-        # Ensure cache is populated
-        cache_props = self._get_cache_properties()
-        if not cache_props['valid']:
-            self.get_all_tags(use_cache=True)
-        
-        # Check cache first
-        if tag_name_lower in self._tag_cache:
-            performance_monitor.record_cache_hit()
-            performance_monitor.record_tag_from_cache()
-            return self._tag_cache[tag_name_lower]
-        
-        # Create new tag if not found
-        performance_monitor.record_cache_miss()
-        self.logger.debug("Creating new tag", name=tag_name_clean)
-        try:
-            tag_request = CreateTagRequest(name=tag_name_clean)
-            new_tag = self.create_tag(tag_request)
-            performance_monitor.record_tag_created()
-            
-            # Add to cache
-            self._tag_cache[tag_name_lower] = new_tag
-            return new_tag
-            
-        except Exception as e:
-            # Handle "tag already exists" case
-            if "already exists" in str(e).lower():
-                # Refresh cache and try again
-                self.invalidate_tag_cache()
-                self.get_all_tags(use_cache=True)
-                if tag_name_lower in self._tag_cache:
-                    self.logger.debug(f"Found existing tag after cache refresh: {tag_name_clean}")
-                    return self._tag_cache[tag_name_lower]
-            
-            # Re-raise the exception if we can't handle it
-            raise
-    
-    def _is_valid_tag_name(self, tag_name: str) -> bool:
-        """Check if a tag name is valid for Immich."""
-        if not tag_name or not tag_name.strip():
-            return False
-        
-        # Only filter out characters that would actually break the API or filesystem
-        # Be more permissive for anime tags which may have special characters
-        invalid_chars = ['\n', '\r', '\t']  # Only control characters
-        for char in invalid_chars:
-            if char in tag_name:
-                return False
-        
-        # Check length (reasonable limits)
-        tag_cleaned = tag_name.strip()
-        if len(tag_cleaned) < 1 or len(tag_cleaned) > 100:
-            return False
-            
+
+    def get_or_create_tags_bulk(self, names):
+        names = list(dict.fromkeys(names))
+        if any(not n or any(c in n for c in "\r\n\t") or any(not p for p in n.split("/")) for n in names):
+            raise ValueError("Tags must have nonempty path segments without control characters")
+        self.get_all_tags()
+        missing = [name for name in names if name not in self._tag_cache]
+        for offset in range(0, len(missing), 100):
+            requested = missing[offset:offset + 100]
+            response = self._make_request("PUT", "/api/tags", json_data={"tags": requested})
+            tags = [Tag.model_validate(item) for item in response.json()]
+            self._tag_cache.update({tag.path: tag for tag in tags})
+            if any(name not in self._tag_cache for name in requested):
+                raise ImmichAPIError("Tag upsert returned an incomplete result")
+        return {name: self._tag_cache[name] for name in names}
+
+    def get_or_create_tag(self, name):
+        return self.get_or_create_tags_bulk([name])[name]
+
+    def tag_single_asset(self, asset_id, tag_ids):
+        if not tag_ids:
+            return
+        self._make_request("PUT", "/api/tags/assets", json_data={"assetIds": [asset_id], "tagIds": list(set(tag_ids))})
+        # Bulk tagging can silently omit inaccessible IDs. Read back before recording completion.
+        actual = self.get_asset(asset_id)
+        if actual.tags is None or not set(tag_ids).issubset({tag.id for tag in actual.tags}):
+            raise ImmichAPIError(f"Tag assignment incomplete for asset {asset_id}")
+
+    def get_asset(self, asset_id):
+        return Asset.model_validate(self._make_request("GET", f"/api/assets/{asset_id}").json())
+
+    def download_asset(self, asset_id, use_thumbnail=True):
+        endpoint = f"/api/assets/{asset_id}/" + ("thumbnail" if use_thumbnail else "original")
+        return self._make_request("GET", endpoint, params={"size": "preview"} if use_thumbnail else None).content
+
+    def _album_asset_ids(self):
+        if not self.settings.immich_include_album_ids:
+            return None
+        ids = set()
+        for album_id in self.settings.immich_include_album_ids:
+            data = self._make_request("GET", f"/api/albums/{album_id}").json()
+            if not isinstance(data.get("assets"), list):
+                raise ImmichAPIError("Album response does not include assets; refusing an unscoped search")
+            ids.update(asset["id"] for asset in data["assets"])
+        return ids
+
+    def _structured_query(self, library_id, marker_id, cursor):
+        filters = {"type": {"eq": "IMAGE"}, "isOffline": {"eq": False}, "trashedAt": {"eq": None}}
+        if library_id:
+            filters["libraryId"] = {"eq": library_id}
+        if marker_id:
+            filters["tagIds"] = {"none": [marker_id]}
+        query = {"filter": filters, "size": self.settings.batch_size,
+                 "orderBy": {"field": "fileCreatedAt", "direction": "asc"}}
+        if cursor:
+            query["cursor"] = cursor
+        return query
+
+    def iter_assets(self, *, processed_tag_id=None) -> Iterator[Asset]:
+        album_ids = self._album_asset_ids()
+        libraries = self.settings.immich_include_library_ids or [None]
+        excluded = set(self.settings.immich_exclude_library_ids)
+        seen = set()
+        for library_id in libraries:
+            if library_id in excluded:
+                continue
+            page, cursor = 1, None
+            tokens = set()
+            while True:
+                structured = self._search_api != "legacy"
+                query = self._structured_query(library_id, processed_tag_id, cursor) if structured else {
+                    "type": "IMAGE", "size": self.settings.batch_size, "page": page,
+                    "order": "asc", "isOffline": False, "withDeleted": False,
+                }
+                if not structured and library_id:
+                    query["libraryId"] = library_id
+                try:
+                    response = self._make_request("POST", "/api/search/metadata", json_data=query).json()
+                except ImmichAPIError as error:
+                    # Only a rejected structured query permits fallback; never retry authorization errors unscoped.
+                    if self._search_api == "auto" and error.status_code == 400:
+                        self.logger.warning("Structured search rejected; using legacy pagination with local scope/marker checks")
+                        self._search_api = "legacy"
+                        continue
+                    raise
+                section = response.get("assets")
+                if not isinstance(section, dict) or not isinstance(section.get("items"), list):
+                    raise ImmichAPIError("Invalid metadata search response")
+                # Older versions may ignore the unknown filter rather than reject it.
+                if structured and self._search_api == "auto" and "nextCursor" not in section:
+                    self.logger.warning("Server returned legacy pagination; using legacy search")
+                    self._search_api = "legacy"
+                    continue
+                if structured:
+                    self._search_api = "structured"
+                for item in section["items"]:
+                    asset = Asset.model_validate(item)
+                    if asset.id in seen:
+                        continue
+                    if asset.type != "IMAGE" or asset.isOffline or asset.isTrashed:
+                        continue
+                    if library_id and asset.libraryId != library_id:
+                        continue
+                    if asset.libraryId in excluded or (album_ids is not None and asset.id not in album_ids):
+                        continue
+                    if asset.tags is None:
+                        asset = self.get_asset(asset.id)
+                    if asset.tags is None:
+                        raise ImmichAPIError(f"Asset {asset.id} response omitted tags")
+                    if asset.type != "IMAGE" or asset.isOffline or asset.isTrashed:
+                        continue
+                    if library_id and asset.libraryId != library_id:
+                        continue
+                    if asset.libraryId in excluded:
+                        continue
+                    if processed_tag_id and any(t.id == processed_tag_id for t in asset.tags):
+                        continue
+                    seen.add(asset.id)
+                    yield asset
+                token_key = "nextCursor" if structured else "nextPage"
+                if token_key not in section:
+                    raise ImmichAPIError(f"Metadata response omitted {token_key}")
+                token = section[token_key]
+                if token is None:
+                    break
+                if str(token) in tokens or not section["items"]:
+                    raise ImmichAPIError("Metadata pagination did not advance")
+                tokens.add(str(token))
+                if structured:
+                    cursor = token
+                else:
+                    page = int(token)
+
+    def test_connection(self):
+        self.get_all_tags(use_cache=False)
         return True
 
-    def get_or_create_tags_bulk(self, tag_names: List[str]) -> Dict[str, Tag]:
-        """Get or create multiple tags efficiently. Returns a mapping of original tag names to Tag objects."""
-        if not tag_names:
-            return {}
-        
-        # Filter out invalid tag names
-        valid_tag_names = [name for name in tag_names if self._is_valid_tag_name(name)]
-        if len(valid_tag_names) < len(tag_names):
-            invalid_tags = [name for name in tag_names if not self._is_valid_tag_name(name)]
-            self.logger.debug(f"Filtered out {len(invalid_tags)} invalid tag names", invalid_tags=invalid_tags)
-        
-        if not valid_tag_names:
-            return {}
-        
-        # Ensure cache is populated
-        cache_props = self._get_cache_properties()
-        if not cache_props['valid']:
-            self.get_all_tags(use_cache=True)
-        
-        result = {}
-        missing_tags = []
-        
-        # Check which tags exist in cache
-        for tag_name in valid_tag_names:
-            tag_name_lower = tag_name.lower()
-            if tag_name_lower in self._tag_cache:
-                result[tag_name] = self._tag_cache[tag_name_lower]
-                performance_monitor.record_cache_hit()
-                performance_monitor.record_tag_from_cache()
-            else:
-                missing_tags.append(tag_name)
-                performance_monitor.record_cache_miss()
-        
-        # Create missing tags
-        if missing_tags:
-            performance_monitor.record_bulk_operation()
-            self.logger.debug("Creating missing tags", count=len(missing_tags))
-            for tag_name in missing_tags:
-                try:
-                    new_tag = self.create_tag(CreateTagRequest(name=tag_name.strip()))
-                    result[tag_name] = new_tag
-                    performance_monitor.record_tag_created()
-                except Exception as e:
-                    # Check if tag already exists (common race condition)
-                    if "already exists" in str(e).lower():
-                        # Refresh cache and try to find the tag
-                        self.invalidate_tag_cache()
-                        self.get_all_tags(use_cache=True)
-                        tag_name_lower = tag_name.lower()
-                        if tag_name_lower in self._tag_cache:
-                            result[tag_name] = self._tag_cache[tag_name_lower]
-                            self.logger.debug(f"Found existing tag after cache refresh: {tag_name}")
-                        else:
-                            self.logger.debug(f"Tag exists but not found in cache: {tag_name}")
-                    else:
-                        self.logger.debug(f"Failed to create tag '{tag_name}': {e}")
-                    # Continue with other tags
-                    continue
-        
-        self.logger.debug("Bulk tag lookup/creation completed", 
-                         requested=len(tag_names), 
-                         found=len(result))
-        return result
-    
-    def bulk_tag_assets(self, asset_ids: List[str], tag_ids: List[str]) -> None:
-        """Bulk tag assets with multiple tags."""
-        if not asset_ids or not tag_ids:
-            return
-        
-        self.logger.debug(
-            "Bulk tagging assets",
-            asset_count=len(asset_ids),
-            tag_count=len(tag_ids)
-        )
-        
-        # Use the correct bulk tagging endpoint with PUT method
-        request_data = BulkTagRequest(assetIds=asset_ids, tagIds=tag_ids)
-        
-        self._make_request(
-            method="PUT",
-            endpoint="/api/tags/assets",
-            json_data=request_data.dict()
-        )
-        
-        self.logger.debug(
-            "Bulk tagged assets",
-            asset_count=len(asset_ids),
-            tag_count=len(tag_ids)
-        )
-    
-    def tag_single_asset(self, asset_id: str, tag_ids: List[str]) -> None:
-        """Tag a single asset with multiple tags."""
-        if not tag_ids:
-            return
-        
-        self.logger.debug("Tagging single asset", asset_id=asset_id, tag_count=len(tag_ids))
-        
-        # Use the bulk endpoint for single asset tagging (simpler approach)
-        request_data = BulkTagRequest(assetIds=[asset_id], tagIds=tag_ids)
-        
-        self._make_request(
-            method="PUT",
-            endpoint="/api/tags/assets",
-            json_data=request_data.dict()
-        )
-        
-        self.logger.debug("Tagged single asset", asset_id=asset_id, tag_count=len(tag_ids))
-    
-    def get_assets_with_tag(self, tag_id: str, limit: Optional[int] = None) -> List[Asset]:
-        """Get all assets that have a specific tag.
-        
-        Args:
-            tag_id: The tag ID to search for
-            limit: Maximum number of assets to return (default: 1000)
-        """
-        if limit is None:
-            limit = 1000  # Default reasonable limit for tagged asset queries
-            
-        self.logger.debug(f"📊 Getting assets with tag {tag_id}, limit={limit}")
-        
-        # Use metadata search with specific tag filter
-        response = self._make_request(
-            method="POST",
-            endpoint="/api/search/metadata",
-            json_data={"tagIds": [tag_id]}
-        )
-        
-        response_data = response.json()
-        assets_section = response_data.get("assets", {})
-        assets_list = assets_section.get("items", [])
-        
-        # Parse assets
-        assets = []
-        for asset_data in assets_list[:limit]:  # Respect limit
-            try:
-                assets.append(Asset(**asset_data))
-            except Exception as e:
-                self.logger.warning(f"⚠️  Failed to parse tagged asset: {e}")
-                continue
-        
-        if len(assets_list) >= limit:
-            self.logger.warning(
-                f"Retrieved {len(assets)} tagged assets (limit: {limit}). "
-                "There may be more assets with this tag."
-            )
-        
-        return assets
-    
-    def get_asset(self, asset_id: str) -> Asset:
-        """Get a specific asset by ID."""
-        self.logger.debug("Getting asset", asset_id=asset_id)
-        
-        response = self._make_request(method="GET", endpoint=f"/api/assets/{asset_id}")
-        asset_data = response.json()
-        asset = Asset(**asset_data)
-        
-        self.logger.debug("Retrieved asset", asset_id=asset_id, name=asset.originalFileName)
-        return asset
-    
-    def remove_tags_from_asset(self, asset_id: str, tag_ids: List[str]) -> None:
-        """Remove specific tags from an asset."""
-        if not tag_ids:
-            return
-        
-        self.logger.debug("Removing tags from asset", asset_id=asset_id, tag_count=len(tag_ids))
-        
-        # Use DELETE method to remove tags from asset
-        for tag_id in tag_ids:
-            self._make_request(
-                method="DELETE",
-                endpoint=f"/api/tags/{tag_id}/assets/{asset_id}"
-            )
-        
-        self.logger.info("Removed tags from asset", asset_id=asset_id, tag_count=len(tag_ids))
-    
-    def delete_tag(self, tag_id: str) -> None:
-        """Delete a tag from Immich."""
-        self.logger.debug("Deleting tag", tag_id=tag_id)
-        
-        self._make_request(method="DELETE", endpoint=f"/api/tags/{tag_id}")
-        
-        self.logger.info("Deleted tag", tag_id=tag_id)
-    
-    def test_connection(self) -> bool:
-        """Test the connection to Immich."""
-        try:
-            # Try to get tags as a simple test
-            self.get_all_tags()
-            self.logger.info("Connection test successful")
-            return True
-        except Exception as e:
-            self.logger.error(f"Connection test failed: {e}")
-            return False
-    
-    def invalidate_tag_cache(self):
-        """Invalidate the tag cache to force refresh on next access."""
-        self._set_cache_properties(valid=False)
-        self._tag_cache = {}
-        self.logger.debug("Tag cache invalidated")
-    
     def close(self):
-        """Close the HTTP client."""
         self.client.close()
-    
+
     def __enter__(self):
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
+
+    def __exit__(self, *_):
         self.close()

@@ -1,96 +1,49 @@
-"""
-Data models for the Immich Auto-Tagger service.
-"""
-
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+"""Only model fields used by the tagger; tolerate additional Immich metadata."""
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
 class Tag(BaseModel):
-    """Immich tag model."""
     id: str
     name: str
+    value: str = ""
+    parentId: str | None = None
+
+    @property
+    def path(self):
+        return self.value or self.name
 
 
 class Asset(BaseModel):
-    """Immich asset model."""
     id: str
-    type: str  # "IMAGE" or "VIDEO"
-    originalPath: str
-    originalFileName: str  # Changed from originalName
-    fileCreatedAt: datetime
-    fileModifiedAt: datetime
-    checksum: str
-    deviceAssetId: Optional[str] = None
-    deviceId: Optional[str] = None
-    ownerId: str
-    libraryId: str
-    originalMimeType: Optional[str] = None
-    thumbhash: Optional[str] = None
-    localDateTime: Optional[datetime] = None
-    isFavorite: bool = False
-    isArchived: bool = False
-    isTrashed: bool = False
-    visibility: Optional[str] = None
-    duration: Optional[str] = None
-    livePhotoVideoId: Optional[str] = None
-    people: List[str] = []
+    type: str
+    originalPath: str = ""
+    originalFileName: str = ""
+    libraryId: str | None = None
+    ownerId: str = ""
+    tags: list[Tag] | None = None
     isOffline: bool = False
-    hasMetadata: bool = False
-    duplicateId: Optional[str] = None
-    resized: Optional[bool] = None
-    updatedAt: datetime
-    # Tags for checking if already processed
-    tags: Optional[List[Tag]] = []
+    isTrashed: bool = False
 
 
 class TagPrediction(BaseModel):
-    """Tag prediction from AI model."""
     name: str
-    confidence: float = Field(ge=0.0, le=1.0)
-    
-    def __lt__(self, other):
-        """Sort by confidence (descending)."""
-        return self.confidence > other.confidence
+    confidence: float = Field(ge=0, le=1)
+    kind: Literal["general", "character", "rating"] = "general"
 
 
 class AssetProcessingResult(BaseModel):
-    """Result of processing an asset."""
     asset_id: str
-    success: bool
-    tags_assigned: List[str] = []
-    processing_time: float = 0.0
-    error: Optional[str] = None
+    success: bool = False
+    status: Literal["processed", "skipped", "planned", "failed"] = "failed"
+    tags_assigned: list[str] = Field(default_factory=list)
+    processing_time: float = 0
+    error: str | None = None
 
 
-class BatchProcessingResult(BaseModel):
-    """Result of processing a batch of assets."""
-    batch_size: int
-    successful: int
-    failed: int
-    total_tags_assigned: int
-    processing_time: float
-    results: List[AssetProcessingResult]
-
-
-class HealthStatus(BaseModel):
-    """Health check response."""
-    status: str = "healthy"
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    version: str = "1.0.0"
-    metrics: Dict[str, Any] = {}
-
-
-
-
-class BulkTagRequest(BaseModel):
-    """Request for bulk tagging assets."""
-    assetIds: List[str]
-    tagIds: List[str]
-
-
-class CreateTagRequest(BaseModel):
-    """Request for creating a new tag."""
-    name: str
-    type: str = "OBJECT"
+class RunResult(BaseModel):
+    attempted: int = 0
+    processed: int = 0
+    planned: int = 0
+    failed: int = 0
+    skipped: int = 0

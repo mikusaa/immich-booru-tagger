@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+.env.*
+models
+state
+logs
+__pycache__
+.pytest_cache
+*.pyc
+processing_failures*.json

@@ -170,9 +170,10 @@ logs/
 .env.production
 
 # Docker
-.dockerignore
 
 # OS-specific
 .DS_Store
 Thumbs.db
 processing_failures.json
+processing_failures_*.json
+state/

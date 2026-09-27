@@ -1,134 +1,114 @@
-"""
-Configuration management for the Immich Auto-Tagger service.
-"""
-
-import os
+"""Validated configuration; importing the CLI never requires credentials."""
 import json
-from typing import Optional, List, Dict, Union
-from pydantic import Field, validator
-from pydantic_settings import BaseSettings
+from functools import lru_cache
+from pathlib import Path
+from typing import Annotated, Literal
+from uuid import UUID
+
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+StringList = Annotated[list[str], NoDecode]
 
 
 class Settings(BaseSettings):
-    """Application settings with validation."""
-    
-    # Immich Configuration
-    immich_base_url: str = Field(..., env="IMMICH_BASE_URL")
-    immich_api_key: str = Field(default="", env="IMMICH_API_KEY")  # Legacy single key support
-    immich_api_keys: List[str] = Field(default=[], env="IMMICH_API_KEYS")  # New multi-key support
-    immich_libraries: Dict[str, str] = Field(default={}, env="IMMICH_LIBRARIES")  # Named libraries
-    
-    # Processing Configuration
-    confidence_threshold: float = Field(default=0.35, env="CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)
-    batch_size: int = Field(default=250, env="BATCH_SIZE", description="Natural batch size from metadata API (~250)")
-    processed_tag_name: str = Field(default="auto:processed", env="PROCESSED_TAG_NAME")
-    failure_timeout: int = Field(default=3, env="FAILURE_TIMEOUT", ge=0, description="Max retries for failed assets (0 = never retry)")
-    
-    # Model Configuration
-    tagging_model: str = Field(default="wd14", env="TAGGING_MODEL")
-    model_cache_dir: str = Field(default="/app/models", env="MODEL_CACHE_DIR")
-    
-    # Performance Configuration
-    max_retries: int = Field(default=3, env="MAX_RETRIES", gt=0)
-    retry_delay: float = Field(default=1.0, env="RETRY_DELAY", gt=0.0)
-    request_timeout: float = Field(default=30.0, env="REQUEST_TIMEOUT", gt=0.0)
-    tag_cache_ttl: int = Field(default=300, env="TAG_CACHE_TTL", gt=0)  # Tag cache TTL in seconds
-    
-    # Logging Configuration
-    log_level: str = Field(default="INFO", env="LOG_LEVEL")
-    
-    # Health endpoint
-    health_port: int = Field(default=8000, env="HEALTH_PORT")
-    
-    # Scheduling Configuration
-    enable_scheduler: bool = Field(default=True, env="ENABLE_SCHEDULER")
-    cron_schedule: str = Field(default="0 2 * * *", env="CRON_SCHEDULE")  # Daily at 2 AM
-    timezone: str = Field(default="UTC", env="TIMEZONE")
-    
-    @validator("immich_base_url")
-    def validate_immich_url(cls, v):
-        """Ensure the Immich URL is properly formatted."""
-        if not v.startswith(("http://", "https://")):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", validate_assignment=True,
+                                      hide_input_in_errors=True)
+
+    immich_base_url: str
+    immich_api_key: str = Field(default="", repr=False)
+    immich_api_keys: StringList = Field(default_factory=list, repr=False)
+    immich_libraries: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict, repr=False)
+    immich_include_library_ids: StringList = Field(default_factory=list)
+    immich_include_album_ids: StringList = Field(default_factory=list)
+    immich_exclude_library_ids: StringList = Field(default_factory=list)
+    search_api: Literal["auto", "structured", "legacy"] = "auto"
+
+    confidence_threshold: float = Field(default=0.35, ge=0, le=1)
+    general_threshold: float | None = Field(default=None, ge=0, le=1)
+    character_threshold: float = Field(default=0.90, ge=0, le=1)
+    batch_size: int = Field(default=250, ge=1, le=1000)
+    processed_tag_name: str = "auto:processed"
+    failure_timeout: int = Field(default=3, ge=0)
+    tagging_model: Literal["wd14", "deepdanbooru"] = "wd14"
+    model_repo: str = "SmilingWolf/wd-swinv2-tagger-v3"
+    model_cache_dir: Path = Path("models")
+    deepdanbooru_project_dir: Path | None = None
+    state_dir: Path = Path("state")
+    translations_enabled: bool = True
+    translation_file: Path = Path(__file__).resolve().parent.parent / "data/tag_translations.json"
+    translation_overrides: Path | None = None
+
+    max_retries: int = Field(default=3, ge=0)
+    retry_delay: float = Field(default=1, gt=0)
+    request_timeout: float = Field(default=30, gt=0)
+    tag_cache_ttl: int = Field(default=300, gt=0)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    health_port: int = Field(default=8000, ge=1, le=65535)
+    enable_scheduler: bool = True
+    cron_schedule: str = "0 2 * * *"
+    timezone: str = "Asia/Shanghai"
+    run_on_startup: bool = False
+
+    @field_validator("immich_api_keys", "immich_include_library_ids",
+                     "immich_include_album_ids", "immich_exclude_library_ids", mode="before")
+    @classmethod
+    def parse_lists(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+            value = json.loads(value) if value.startswith("[") else value.split(",")
+        return list(dict.fromkeys(v.strip() for v in (value or []) if v.strip()))
+
+    @field_validator("immich_libraries", mode="before")
+    @classmethod
+    def parse_accounts(cls, value):
+        if isinstance(value, str):
+            return json.loads(value) if value.strip() else {}
+        return value or {}
+
+    @field_validator("immich_include_library_ids", "immich_include_album_ids",
+                     "immich_exclude_library_ids")
+    @classmethod
+    def validate_ids(cls, values):
+        return list(dict.fromkeys(str(UUID(value)) for value in values))
+
+    @field_validator("immich_base_url")
+    @classmethod
+    def validate_url(cls, value):
+        value = value.rstrip("/")
+        if not value.startswith(("http://", "https://")):
             raise ValueError("IMMICH_BASE_URL must start with http:// or https://")
-        return v.rstrip("/")
-    
-    @validator("tagging_model")
-    def validate_tagging_model(cls, v):
-        """Ensure the tagging model is supported."""
-        supported_models = ["wd14", "deepdanbooru"]
-        if v.lower() not in supported_models:
-            raise ValueError(f"TAGGING_MODEL must be one of: {supported_models}")
-        return v.lower()
-    
-    @validator("log_level")
-    def validate_log_level(cls, v):
-        """Ensure the log level is valid."""
-        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-        if v.upper() not in valid_levels:
-            raise ValueError(f"LOG_LEVEL must be one of: {valid_levels}")
-        return v.upper()
-    
-    @validator('immich_api_keys', pre=True, always=True)
-    def parse_api_keys(cls, v, values):
-        """Parse API keys from various formats and ensure we have at least one."""
-        if isinstance(v, str):
-            if not v:  # Empty string, try legacy single key
-                single_key = values.get('immich_api_key', '')
-                return [single_key] if single_key else []
-            # Support JSON array format
-            if v.startswith('[') and v.endswith(']'):
-                try:
-                    return json.loads(v)
-                except json.JSONDecodeError:
-                    raise ValueError("Invalid JSON format for IMMICH_API_KEYS")
-            else:
-                # Support comma-separated format
-                return [key.strip() for key in v.split(',') if key.strip()]
-        elif isinstance(v, list):
-            return v
-        else:
-            # No multi-keys provided, use legacy single key
-            single_key = values.get('immich_api_key', '')
-            return [single_key] if single_key else []
-    
-    @validator('immich_libraries', pre=True)
-    def parse_libraries(cls, v):
-        """Parse named libraries from JSON format."""
-        if isinstance(v, str):
-            if not v:  # Empty string
-                return {}
-            try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                raise ValueError("Invalid JSON format for IMMICH_LIBRARIES")
-        return v if v else {}
-    
-    def get_library_names(self) -> List[str]:
-        """Get library names (or generate default names)."""
-        if self.immich_libraries:
-            return list(self.immich_libraries.keys())
-        else:
-            # Generate default names for API keys
-            return [f"Library_{i+1}" for i in range(len(self.immich_api_keys))]
-    
-    def get_api_keys(self) -> List[str]:
-        """Get all API keys."""
-        if self.immich_libraries:
-            return list(self.immich_libraries.values())
-        return self.immich_api_keys
-    
-    def get_library_config(self) -> List[Dict[str, str]]:
-        """Get library configuration as list of {name, api_key} dicts."""
+        if value.endswith("/api"):
+            raise ValueError("IMMICH_BASE_URL must not include /api")
+        return value
+
+    @field_validator("processed_tag_name")
+    @classmethod
+    def validate_marker(cls, value):
+        if not value.strip() or any(c in value for c in "\n\r\t"):
+            raise ValueError("PROCESSED_TAG_NAME must be a nonempty tag")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_credentials(self):
+        choices = sum(bool(v) for v in (self.immich_api_key, self.immich_api_keys, self.immich_libraries))
+        if choices != 1:
+            raise ValueError("Set exactly one of IMMICH_API_KEY, IMMICH_API_KEYS, IMMICH_LIBRARIES")
+        if self.immich_libraries and any(not n.strip() or not k.strip() for n, k in self.immich_libraries.items()):
+            raise ValueError("Account names and API keys must not be empty")
+        return self
+
+    @property
+    def effective_general_threshold(self):
+        return self.general_threshold if self.general_threshold is not None else self.confidence_threshold
+
+    def get_library_config(self):
         if self.immich_libraries:
             return [{"name": name, "api_key": key} for name, key in self.immich_libraries.items()]
-        else:
-            api_keys = self.get_api_keys()
-            return [{"name": f"Library_{i+1}", "api_key": key} for i, key in enumerate(api_keys)]
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+        keys = self.immich_api_keys or [self.immich_api_key]
+        return [{"name": f"User_{i + 1}", "api_key": key} for i, key in enumerate(keys)]
 
 
-# Global settings instance
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

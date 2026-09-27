@@ -1,381 +1,205 @@
-"""
-Main processor for the Immich Auto-Tagger service.
-"""
-
+"""Shared processing pipeline for single, continuous, scheduled and translation runs."""
+import json
+import logging
+import tempfile
+import threading
 import time
-from typing import List, Optional
-from .immich_client import ImmichClient, ImmichAPIError
-from .tagging_engine import create_tagging_engine, TaggingEngineError
-from .models import Asset, Tag, TagPrediction, AssetProcessingResult, BatchProcessingResult
-from .config import settings
-from .logging import get_logger, MetricsLogger
-from .performance_monitor import performance_monitor
+from contextlib import ExitStack
+
+from .config import get_settings
 from .failure_tracker import FailureTracker
+from .immich_client import ImmichClient
+from .models import Asset, AssetProcessingResult, RunResult
+from .state import account_scope, record_assignment, writer_lock
+from .translation_catalog import TranslationCatalog
 
 
-class ProcessorError(Exception):
-    """Custom exception for processor errors."""
+class ProcessorError(RuntimeError):
     pass
 
 
 class ImmichAutoTagger:
-    """Main processor for auto-tagging Immich assets."""
-    
-    def __init__(self):
-        self.logger = get_logger("processor")
-        self.metrics = MetricsLogger()
-        self.immich_client = ImmichClient()
-        self.tagging_engine = create_tagging_engine()
-        self.processed_tag: Optional[Tag] = None
-        
-        # Progress tracking (global and per-library)
-        self.total_processed_assets = 0
-        self.total_assigned_tags = 0
-        self.library_metrics: Dict[str, Dict] = {}
-        
-        # Initialize failure tracking (will be set per library)
-        self.failure_tracker = None
-        self.library_failure_trackers: Dict[str, FailureTracker] = {}
-        
-        # Initialize the processed tag
-        self._initialize_processed_tag()
-    
-    def _initialize_processed_tag(self):
-        """Initialize the processed tag for marking completed assets."""
+    def __init__(self, settings=None, *, dry_run=False, client_factory=ImmichClient, engine_factory=None):
+        self.settings = settings or get_settings()
+        self.dry_run = dry_run
+        self.logger = logging.getLogger("processor")
+        self.clients = [client_factory(self.settings, account, dry_run=dry_run)
+                        for account in self.settings.get_library_config()]
+        self.engine_factory = engine_factory
+        self._engine = None
+        self._catalog = None
+        self._metrics_lock = threading.Lock()
+        self.running = False
+        self.last_error = None
+        self.last_result = RunResult()
+        self.cancelled = threading.Event()
+
+    @property
+    def engine(self):
+        if self._engine is None:
+            from .tagging_engine import create_tagging_engine
+            self._engine = (self.engine_factory or create_tagging_engine)(self.settings)
+        return self._engine
+
+    @property
+    def catalog(self):
+        if self._catalog is None and self.settings.translations_enabled:
+            self._catalog = TranslationCatalog(self.settings.translation_file, self.settings.translation_overrides)
+        return self._catalog
+
+    def failure_tracker(self, client, backfill=False):
+        scope = account_scope(self.settings, client.account)
+        return FailureTracker(scope + ("-zh" if backfill else ""), settings=self.settings)
+
+    def _paths(self, client, asset, backfill):
+        if backfill:
+            names = []
+            for tag in asset.tags or []:
+                name = tag.path
+                prefix, separator, leaf = name.partition("/")
+                if (name == self.settings.processed_tag_name or prefix == "zh"
+                        or prefix in self.catalog.categories.values()):
+                    continue
+                if separator and prefix in ("general", "character", "rating"):
+                    name = leaf
+                translated = self.catalog.translate(name)
+                if translated:
+                    names.append(translated)
+            return list(dict.fromkeys(names))
+        predictions = self.engine.predict_tags(client.download_asset(asset.id))
+        names = [prediction.name for prediction in predictions]
+        if self.catalog:
+            for prediction in predictions:
+                translated = self.catalog.translate(prediction.name)
+                if translated:
+                    names.append(translated)
+        return list(dict.fromkeys(names))
+
+    def process_asset(self, client, asset, *, backfill=False):
+        started = time.monotonic()
+        result = AssetProcessingResult(asset_id=asset.id)
         try:
-            self.processed_tag = self.immich_client.get_or_create_tag(settings.processed_tag_name)
-            self.logger.info(f"🏷️  Using processed tag: '{self.processed_tag.name}'")
-        except Exception as e:
-            self.logger.error(f"❌ Failed to initialize processed tag: {str(e)}")
-            raise ProcessorError(f"Failed to initialize processed tag: {e}")
-    
-    def process_asset(self, asset: Asset) -> AssetProcessingResult:
-        """Process a single asset for tagging."""
-        start_time = time.time()
-        result = AssetProcessingResult(asset_id=asset.id, success=False)
-        
-        try:
-            # Skip non-image assets for now (could be extended for video frames)
-            if asset.type != "IMAGE":
-                result.success = False
-                result.error = f"Unsupported asset type: {asset.type}"
+            if asset.tags is None:
+                asset = client.get_asset(asset.id)
+            if not backfill and any(t.path == self.settings.processed_tag_name for t in asset.tags or []):
+                result.success, result.status = True, "skipped"
                 return result
-            
-            # Check if asset already has the processed tag (skip if already done)
-            if self.processed_tag and hasattr(asset, 'tags') and asset.tags:
-                for tag in asset.tags:
-                    if tag.id == self.processed_tag.id:
-                        result.success = True
-                        result.tags_assigned = []
-                        result.processing_time = time.time() - start_time
-                        self.logger.debug(f"⏭️  Skipping already processed asset: {asset.id}")
-                        return result
-            
-            # Download asset thumbnail
-            image_data = self.immich_client.download_asset(asset.id, use_thumbnail=True)
-            
-            # Predict tags
-            predictions = self.tagging_engine.predict_tags(image_data)
-            
-            if not predictions:
-                result.success = True
-                result.tags_assigned = []
-            else:
-                # Use bulk tag operations for efficiency
-                tag_names = [prediction.name for prediction in predictions]
-                tag_mapping = self.immich_client.get_or_create_tags_bulk(tag_names)
-                
-                # Extract tag IDs for successful tags
-                tag_ids = []
-                for tag_name, tag in tag_mapping.items():
-                    tag_ids.append(tag.id)
-                    result.tags_assigned.append(tag_name)
-                
-                # Apply tags to asset
-                if tag_ids:
-                    self.immich_client.tag_single_asset(asset.id, tag_ids)
-                
-                result.success = True
-            
-            # Mark asset as processed
-            if self.processed_tag:
-                self.immich_client.tag_single_asset(asset.id, [self.processed_tag.id])
-            
-            processing_time = time.time() - start_time
-            result.processing_time = processing_time
-            
-            # Update internal metrics only
-            self.metrics.metrics["assets_processed"] += 1
-            self.metrics.metrics["tags_assigned"] += len(result.tags_assigned)
-            self.metrics.metrics["processing_time"] += processing_time
-            
-            # Record performance metrics
-            performance_monitor.record_asset_processed(processing_time)
-            
-        except Exception as e:
-            processing_time = time.time() - start_time
-            result.success = False
-            result.error = str(e)
-            result.processing_time = processing_time
-            
-            # Update failure metrics only  
-            self.metrics.metrics["failures"] += 1
-        
+            paths = self._paths(client, asset, backfill)
+            current = client.get_asset(asset.id) if not self.dry_run else asset
+            if current.type != "IMAGE" or current.isOffline or current.isTrashed:
+                result.success, result.status = True, "skipped"
+                return result
+            included = self.settings.immich_include_library_ids
+            if (included and current.libraryId not in included) or current.libraryId in self.settings.immich_exclude_library_ids:
+                raise ProcessorError("Asset moved outside the configured scope")
+            if current.tags is None:
+                raise ProcessorError("Asset response omitted tags")
+            existing = {tag.path for tag in current.tags}
+            missing = [path for path in paths if path not in existing]
+            if self.dry_run:
+                result.success, result.status = True, "planned"
+                result.tags_assigned = missing
+                self.logger.info("Preview %s: %s", asset.id, json.dumps(missing, ensure_ascii=False))
+                return result
+            if missing:
+                mapping = client.get_or_create_tags_bulk(missing)
+                if set(mapping) != set(missing):
+                    raise ProcessorError("Not all requested tags were resolved")
+                client.tag_single_asset(asset.id, [mapping[name].id for name in missing])
+                record_assignment(self.settings.state_dir, account_scope(self.settings, client.account), asset.id, missing)
+            if not backfill and self.settings.processed_tag_name not in existing:
+                marker = client.get_or_create_tag(self.settings.processed_tag_name)
+                client.tag_single_asset(asset.id, [marker.id])
+            result.success = True
+            result.status = "skipped" if backfill and not missing else "processed"
+            result.tags_assigned = missing
+        except Exception as error:
+            result.error = str(error)
+            self.logger.error("Asset %s failed: %s", asset.id, error)
+        finally:
+            result.processing_time = time.monotonic() - started
         return result
-    
-    def process_batch(self, assets: List[Asset]) -> BatchProcessingResult:
-        """Process a batch of assets with optimized bulk operations."""
-        start_time = time.time()
-        results = []
-        
-        # Pre-warm the tag cache before processing
+
+    def run(self, *, backfill=False, limit=None, single=False, max_cycles=None):
+        if backfill and not self.settings.translations_enabled:
+            raise ProcessorError("backfill-zh requires TRANSLATIONS_ENABLED=true")
+        limits = [n for n in (limit, self.settings.batch_size if single else None,
+                             max_cycles * self.settings.batch_size if max_cycles else None) if n is not None]
+        maximum = min(limits) if limits else None
+        if not self.settings.immich_include_library_ids and not self.settings.immich_include_album_ids:
+            self.logger.warning("No include scope configured: all visible image assets may be processed")
+        result = RunResult()
+        self.running, self.last_error = True, None
         try:
-            self.immich_client.get_all_tags(use_cache=True)
-        except Exception as e:
-            self.logger.warning(f"⚠️  Failed to pre-warm tag cache: {str(e)}")
-        
-        for asset in assets:
-            result = self.process_asset(asset)
-            results.append(result)
-        
-        batch_time = time.time() - start_time
-        
-        # Process failure tracking for failed assets
-        for i, result in enumerate(results):
-            if not result.success and result.error:
-                asset = assets[i]
-                should_retry = self.failure_tracker.record_failure(asset.id)
-                if not should_retry:
-                    self.logger.warning(f"❌ Asset {asset.originalFileName} ({asset.id}) marked as permanently failed")
-        
-        # Calculate batch statistics
-        successful = sum(1 for r in results if r.success)
-        failed = sum(1 for r in results if not r.success and r.error)
-        skipped = sum(1 for r in results if r.success and not r.tags_assigned)  # Already processed
-        processed = sum(1 for r in results if r.success and r.tags_assigned)  # Newly processed
-        total_tags_assigned = sum(len(r.tags_assigned) for r in results if r.success)
-        
-        batch_result = BatchProcessingResult(
-            batch_size=len(assets),
-            successful=successful,
-            failed=failed,
-            total_tags_assigned=total_tags_assigned,
-            processing_time=batch_time,
-            results=results
-        )
-        
-        # Update totals (only count newly processed assets, not skipped ones)
-        self.total_processed_assets += processed
-        self.total_assigned_tags += total_tags_assigned
-        
-        # Update library-specific metrics
-        current_library = self.immich_client.current_library_name
-        if current_library in self.library_metrics:
-            self.library_metrics[current_library]["processed_assets"] += processed
-            self.library_metrics[current_library]["assigned_tags"] += total_tags_assigned
-            self.library_metrics[current_library]["failed_assets"] += failed
-        
-        # Record performance metrics
-        performance_monitor.record_batch_processed(batch_time)
-        
-        
-        # Clean, focused logging with progress
-        rate_per_second = len(assets) / batch_time if batch_time > 0 else 0
-        
-        # Create status message based on what happened
-        if skipped > 0:
-            status_msg = f"📊 Batch: {processed} processed, {skipped} already done"
-            if failed > 0:
-                status_msg += f", {failed} failed"
-        else:
-            status_msg = f"📊 Batch: {processed} processed"
-            if failed > 0:
-                status_msg += f", {failed} failed"
-        
-        self.logger.info(
-            f"{status_msg} | "
-            f"{total_tags_assigned} tags assigned | "
-            f"Rate: {rate_per_second:.1f}/sec | "
-            f"Total: {self.total_processed_assets} processed, {self.total_assigned_tags} tags"
-        )
-        
-        return batch_result
-    
-    def set_current_library(self, library_name: str):
-        """Set the current library for processing."""
-        # Initialize failure tracker for this library if not exists
-        if library_name not in self.library_failure_trackers:
-            self.library_failure_trackers[library_name] = FailureTracker(library_name)
-        
-        self.failure_tracker = self.library_failure_trackers[library_name]
-        
-        # Initialize library metrics if not exists
-        if library_name not in self.library_metrics:
-            self.library_metrics[library_name] = {
-                "processed_assets": 0,
-                "assigned_tags": 0,
-                "failed_assets": 0
-            }
-    
-    def get_unprocessed_assets(self, limit: Optional[int] = None) -> List[Asset]:
-        """Get untagged image assets that need processing.
-        
-        Now simplified: uses metadata search to find image assets with no tags.
-        Videos are excluded since WD14 cannot process them.
-        The API naturally returns ~250 assets at a time.
-        """
-        if limit is None:
-            limit = settings.batch_size
-        
-        try:
-            # Check for external changes to failure file (e.g., cleanup script ran)
-            if self.failure_tracker and self.failure_tracker.check_for_external_changes():
-                self.logger.debug("🔄 Failure tracking data refreshed from external changes")
-            
-            assets = self.immich_client.get_unprocessed_assets()
-            
-            if not assets:
-                library_name = self.immich_client.current_library_name
-                self.logger.info(f"✅ Library '{library_name}': No more untagged images found - processing complete!")
-                return []
-            
-            # Filter out permanently failed assets
-            if self.failure_tracker:
-                filtered_assets = self.failure_tracker.filter_failed_assets(assets)
-            else:
-                filtered_assets = assets
-            
-            if not filtered_assets:
-                if len(assets) > 0:
-                    library_name = self.immich_client.current_library_name
-                    self.logger.warning(f"⚠️  Library '{library_name}': Found {len(assets)} untagged images, but all are permanently failed!")
-                    self.logger.info("💡 Use --show-failures to see failed asset IDs or --reset-failures to retry them")
-                return []
-            
-            library_name = self.immich_client.current_library_name
-            self.logger.info(f"🎯 Library '{library_name}': Found {len(filtered_assets)} untagged images to process")
-            return filtered_assets
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get unprocessed assets: {str(e)}")
-            raise ProcessorError(f"Failed to get unprocessed assets: {e}")
-    
-    def run_processing_cycle(self) -> bool:
-        """Run a single processing cycle."""
-        try:
-            # Get unprocessed assets
-            assets = self.get_unprocessed_assets()
-            
-            if not assets:
-                self.logger.info("✅ All images have been processed!")
-                return False
-            
-            # Process the batch
-            batch_result = self.process_batch(assets)
-            
-            # Return True if there were any assets processed (successful or failed)
-            # This indicates we should continue looking for more assets
-            assets_processed = batch_result.successful + batch_result.failed
-            return assets_processed > 0
-            
-        except Exception as e:
-            self.logger.error(f"❌ Processing cycle failed: {str(e)}")
-            return False
-    
-    def run_continuous_processing(self, max_cycles: Optional[int] = None):
-        """Run continuous processing until no more assets are found or max cycles reached."""
-        cycle_count = 0
-        
-        self.logger.info("🚀 Starting continuous processing...")
-        
-        while True:
-            if max_cycles and cycle_count >= max_cycles:
-                self.logger.info(f"🔢 Reached maximum cycles: {max_cycles}")
-                break
-            
-            cycle_count += 1
-            
-            # Run processing cycle
-            should_continue = self.run_processing_cycle()
-            
-            if not should_continue:
-                self.logger.info("🎉 Processing complete! No more assets to process.")
-                break
-            
-            # Small delay between cycles to be gentle on the API
-            time.sleep(1.0)
-        
-        # Final summary
-        self.logger.info(
-            f"🏁 Processing complete! Total: {self.total_processed_assets} assets processed, "
-            f"{self.total_assigned_tags} tags assigned in {cycle_count} cycles"
-        )
-        
-        # Log final performance summary
-        performance_monitor.log_performance_summary()
-    
-    def reset_progress(self):
-        """Reset processing progress counters."""
-        self.total_processed_assets = 0
-        self.total_assigned_tags = 0
-        self.logger.info("🔄 Progress counters reset")
-    
-    def get_progress_status(self) -> dict:
-        """Get processing progress information."""
-        return {
-            "total_processed": self.total_processed_assets,
-            "total_tags_assigned": self.total_assigned_tags
-        }
-    
-    def get_failure_summary(self) -> dict:
-        """Get failure tracking summary."""
-        return self.failure_tracker.get_failure_summary()
-    
-    def get_failed_asset_ids(self, permanently_failed_only: bool = True) -> List[str]:
-        """Get list of failed asset IDs.
-        
-        Args:
-            permanently_failed_only: If True, only return permanently failed assets.
-                                   If False, return all failed assets (including retry candidates).
-        """
-        if permanently_failed_only:
-            return self.failure_tracker.get_permanently_failed_assets()
-        else:
-            return list(self.failure_tracker.get_failed_assets().keys())
-    
-    def reset_failures(self, asset_ids: List[str] = None):
-        """Reset failure tracking for specific assets or all assets.
-        
-        Args:
-            asset_ids: List of asset IDs to reset, or None to reset all failures
-        """
-        self.failure_tracker.reset_failures(asset_ids)
+            # Validate the catalog before any writes, including the first marker.
+            self.catalog
+            if self._catalog:
+                self._catalog.missing.clear()
+            with writer_lock(self.settings.state_dir, self.dry_run), ExitStack() as stack:
+                snapshots = []
+                selected = 0
+                # Snapshot before tagging: legacy numbered pages must not shrink under our writes.
+                for client in self.clients:
+                    marker = next((t for t in client.get_all_tags(use_cache=False)
+                                   if t.path == self.settings.processed_tag_name), None)
+                    tracker = self.failure_tracker(client, backfill)
+                    snapshot = stack.enter_context(tempfile.SpooledTemporaryFile(mode="w+t", max_size=1024 * 1024, encoding="utf-8"))
+                    for asset in client.iter_assets(processed_tag_id=None if backfill or marker is None else marker.id):
+                        if self.cancelled.is_set():
+                            break
+                        if tracker.is_permanently_failed(asset.id):
+                            result.skipped += 1
+                            continue
+                        if maximum is not None and selected >= maximum:
+                            break
+                        snapshot.write(asset.model_dump_json() + "\n")
+                        selected += 1
+                    snapshot.seek(0)
+                    snapshots.append((client, tracker, snapshot))
+                    if maximum is not None and selected >= maximum:
+                        break
+                # A broken model/cache is a run failure, not thousands of bad images.
+                if selected and not backfill and not self.cancelled.is_set():
+                    self.engine.prepare()
+                for client, tracker, snapshot in snapshots:
+                    for line in snapshot:
+                        if self.cancelled.is_set():
+                            break
+                        asset = Asset.model_validate_json(line)
+                        item = self.process_asset(client, asset, backfill=backfill)
+                        result.attempted += 1
+                        setattr(result, item.status, getattr(result, item.status) + 1)
+                        if not self.dry_run:
+                            if not item.success:
+                                tracker.record_failure(asset.id)
+                            elif asset.id in tracker.failures:
+                                tracker.reset_failures([asset.id])
+                        with self._metrics_lock:
+                            self.last_result = result.model_copy()
+                if result.failed:
+                    self.last_error = f"{result.failed} assets failed"
+                if self._catalog and self._catalog.missing:
+                    self.logger.info("Missing translations (%s): %s", len(self._catalog.missing),
+                                     self._catalog.missing.most_common(20))
+                self.logger.info("Run complete: %s", result.model_dump())
+                return result
+        except Exception as error:
+            self.last_error = str(error)
+            raise
+        finally:
+            with self._metrics_lock:
+                self.last_result = result.model_copy()
+            self.running = False
 
     def get_metrics(self):
-        """Get current processing metrics."""
-        base_metrics = self.metrics.get_metrics()
-        performance_metrics = performance_monitor.get_metrics_dict()
-        progress_info = self.get_progress_status()
-        
-        # Combine all metric sources
-        combined_metrics = {
-            "basic_metrics": base_metrics,
-            "performance_metrics": performance_metrics,
-            "progress_info": progress_info
-        }
-        
-        return combined_metrics
-    
-    def test_connection(self) -> bool:
-        """Test the connection to Immich."""
-        return self.immich_client.test_connection()
-    
+        with self._metrics_lock:
+            return {"running": self.running, "last_error": self.last_error,
+                    "last_run": self.last_result.model_dump(),
+                    "translation_revision": self._catalog.revision if self._catalog else None}
+
+    def test_connection(self):
+        return all(client.test_connection() for client in self.clients)
+
     def close(self):
-        """Clean up resources."""
-        self.immich_client.close()
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        for client in self.clients:
+            client.close()

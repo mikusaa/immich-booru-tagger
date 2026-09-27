@@ -17,7 +17,8 @@ from typing import List, Dict, Optional
 from immich_tagger.immich_client import ImmichClient
 from immich_tagger.failure_tracker import FailureTracker
 from immich_tagger.logging import get_logger
-from immich_tagger.config import settings
+from immich_tagger.config import get_settings
+from immich_tagger.state import account_scope
 
 
 class AssetCleanupError(Exception):
@@ -30,8 +31,11 @@ class FailedAssetCleaner:
     
     def __init__(self):
         self.logger = get_logger("asset_cleaner")
-        self.immich_client = ImmichClient()
-        self.failure_tracker = FailureTracker()
+        settings = get_settings()
+        self.immich_client = ImmichClient(settings)
+        self.failure_tracker = FailureTracker(
+            account_scope(settings, settings.get_library_config()[0]), settings=settings
+        )
         
     def get_failed_assets_info(self) -> Dict[str, Dict]:
         """Get detailed information about failed assets."""
