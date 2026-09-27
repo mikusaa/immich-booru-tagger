@@ -1,7 +1,7 @@
 """
 Immich Auto-Tag Processor
 
-A standalone service that processes images/videos from an Immich instance,
+A standalone service that processes images from an Immich instance,
 runs them through anime-oriented tag inference models, and pushes the
 resulting tags back to Immich via its official API.
 """

@@ -36,6 +36,20 @@ def test_invalid_configuration_rejected(settings, values):
         Settings(_env_file=None, immich_base_url="http://test", **values)
 
 
+@pytest.mark.parametrize("english,chinese", [("true", "true"), ("false", "true"),
+                                            ("true", "false"), ("false", "false")])
+def test_tag_language_environment_configuration(settings, monkeypatch, english, chinese):
+    monkeypatch.setenv("ENGLISH_TAGS_ENABLED", english)
+    monkeypatch.setenv("TRANSLATIONS_ENABLED", chinese)
+    if english == chinese == "false":
+        with pytest.raises(ValidationError, match="ENGLISH_TAGS_ENABLED or TRANSLATIONS_ENABLED"):
+            Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+    else:
+        parsed = Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+        assert parsed.english_tags_enabled is (english == "true")
+        assert parsed.translations_enabled is (chinese == "true")
+
+
 def test_help_without_credentials_or_machine_learning_dependencies(settings, tmp_path):
     root = str(Path(__file__).resolve().parents[1])
     result = subprocess.run([sys.executable, "-m", "immich_tagger.main", "--help"],

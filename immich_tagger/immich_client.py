@@ -2,10 +2,26 @@
 import logging
 import time
 from collections.abc import Iterator
+from contextlib import nullcontext
+from functools import wraps
 
 import httpx
 from .config import Settings, get_settings
 from .models import Asset, Tag
+
+
+def observed(operation):
+    def decorate(method):
+        @wraps(method)
+        def wrapped(self, *args, **kwargs):
+            with self._operation(operation):
+                return method(self, *args, **kwargs)
+        return wrapped
+    return decorate
+
+
+class ProcessingCancelled(Exception):
+    """Cooperative cancellation while discovering candidates."""
 
 
 class ImmichAPIError(RuntimeError):
@@ -28,31 +44,55 @@ class ImmichClient:
             timeout=self.settings.request_timeout,
             transport=transport,
         )
+        self.progress = None
+        self.cancelled = None
+        self.album_asset_ids = None
         self._tag_cache: dict[str, Tag] = {}
         self._cache_time = None
         self._search_api = self.settings.search_api
+
+    def _operation(self, name):
+        return self.progress.operation(name) if self.progress else nullcontext()
+
+    def _check_cancelled(self):
+        if self.cancelled is not None and self.cancelled.is_set():
+            raise ProcessingCancelled()
+
+    def _skip(self, reason):
+        if self.progress:
+            self.progress.skip(reason)
 
     def _make_request(self, method, endpoint, params=None, json_data=None):
         if self.dry_run and method not in ("GET", "HEAD") and endpoint != "/api/search/metadata":
             raise ImmichAPIError("Dry run forbids Immich writes")
         for attempt in range(self.settings.max_retries + 1):
+            status = None
             try:
                 response = self.client.request(method, endpoint, params=params, json=json_data)
                 response.raise_for_status()
+                if self.progress:
+                    self.progress.update(advance=True)
                 return response
             except httpx.HTTPStatusError as error:
                 status = error.response.status_code
                 if status not in (429, 500, 502, 503, 504) or attempt == self.settings.max_retries:
-                    raise ImmichAPIError(f"{method} {endpoint}: HTTP {status}: {error.response.text[:500]}", status) from error
+                    raise ImmichAPIError(f"{method} {endpoint}: HTTP {status}", status) from None
                 retry_after = error.response.headers.get("Retry-After", "")
                 delay = min(float(retry_after), 60) if retry_after.isdigit() else self.settings.retry_delay * 2 ** attempt
             except httpx.RequestError as error:
                 if attempt == self.settings.max_retries:
                     raise ImmichAPIError(f"{method} {endpoint}: {type(error).__name__}") from error
                 delay = self.settings.retry_delay * 2 ** attempt
+            reason = f"HTTP {status}" if status is not None else "网络请求异常"
+            message = f"[重试] {method} {endpoint}：{reason}｜第 {attempt + 1} 次重试，最多 {self.settings.max_retries} 次｜{min(delay, 60):g} 秒后重试"
+            if self.progress:
+                self.progress.log(message, logging.WARNING)
+            else:
+                self.logger.warning(message)
             time.sleep(min(delay, 60))
         raise AssertionError("Unreachable")
 
+    @observed("read_tags")
     def get_all_tags(self, use_cache=True):
         if use_cache and self._cache_time is not None and time.monotonic() - self._cache_time < self.settings.tag_cache_ttl:
             return list(self._tag_cache.values())
@@ -62,6 +102,7 @@ class ImmichClient:
         self._cache_time = time.monotonic()
         return tags
 
+    @observed("create_tags")
     def get_or_create_tags_bulk(self, names):
         names = list(dict.fromkeys(names))
         if any(not n or any(c in n for c in "\r\n\t") or any(not p for p in n.split("/")) for n in names):
@@ -80,22 +121,25 @@ class ImmichClient:
     def get_or_create_tag(self, name):
         return self.get_or_create_tags_bulk([name])[name]
 
-    def tag_single_asset(self, asset_id, tag_ids):
+    def tag_single_asset(self, asset_id, tag_ids, *, marker=False):
         if not tag_ids:
             return
-        self._make_request("PUT", "/api/tags/assets", json_data={"assetIds": [asset_id], "tagIds": list(set(tag_ids))})
-        # Bulk tagging can silently omit inaccessible IDs. Read back before recording completion.
-        actual = self.get_asset(asset_id)
-        if actual.tags is None or not set(tag_ids).issubset({tag.id for tag in actual.tags}):
-            raise ImmichAPIError(f"Tag assignment incomplete for asset {asset_id}")
+        with self._operation("marker" if marker else "assign_tags"):
+            self._make_request("PUT", "/api/tags/assets", json_data={"assetIds": [asset_id], "tagIds": list(set(tag_ids))})
+            actual = self.get_asset(asset_id, operation="readback")
+            if actual.tags is None or not set(tag_ids).issubset({tag.id for tag in actual.tags}):
+                raise ImmichAPIError(f"标签关联回读不完整：{asset_id} (Tag assignment incomplete)")
 
-    def get_asset(self, asset_id):
-        return Asset.model_validate(self._make_request("GET", f"/api/assets/{asset_id}").json())
+    def get_asset(self, asset_id, *, operation="read_asset"):
+        with self._operation(operation):
+            return Asset.model_validate(self._make_request("GET", f"/api/assets/{asset_id}").json())
 
+    @observed("download")
     def download_asset(self, asset_id, use_thumbnail=True):
         endpoint = f"/api/assets/{asset_id}/" + ("thumbnail" if use_thumbnail else "original")
         return self._make_request("GET", endpoint, params={"size": "preview"} if use_thumbnail else None).content
 
+    @observed("read_album")
     def _album_asset_ids(self):
         if not self.settings.immich_include_album_ids:
             return None
@@ -120,7 +164,12 @@ class ImmichClient:
         return query
 
     def iter_assets(self, *, processed_tag_id=None) -> Iterator[Asset]:
-        album_ids = self._album_asset_ids()
+        for page in self.iter_asset_pages(processed_tag_id=processed_tag_id):
+            yield from page
+
+    def iter_asset_pages(self, *, processed_tag_id=None):
+        self._check_cancelled()
+        album_ids = self.album_asset_ids = self._album_asset_ids()
         libraries = self.settings.immich_include_library_ids or [None]
         excluded = set(self.settings.immich_exclude_library_ids)
         seen = set()
@@ -130,6 +179,7 @@ class ImmichClient:
             page, cursor = 1, None
             tokens = set()
             while True:
+                self._check_cancelled()
                 structured = self._search_api != "legacy"
                 query = self._structured_query(library_id, processed_tag_id, cursor) if structured else {
                     "type": "IMAGE", "size": self.settings.batch_size, "page": page,
@@ -138,56 +188,74 @@ class ImmichClient:
                 if not structured and library_id:
                     query["libraryId"] = library_id
                 try:
-                    response = self._make_request("POST", "/api/search/metadata", json_data=query).json()
+                    with self._operation("search"):
+                        response = self._make_request("POST", "/api/search/metadata", json_data=query).json()
                 except ImmichAPIError as error:
-                    # Only a rejected structured query permits fallback; never retry authorization errors unscoped.
                     if self._search_api == "auto" and error.status_code == 400:
-                        self.logger.warning("Structured search rejected; using legacy pagination with local scope/marker checks")
+                        self.logger.warning("[扫描] 结构化搜索被拒绝，改用旧版分页并保持范围与完成标记校验")
                         self._search_api = "legacy"
                         continue
                     raise
                 section = response.get("assets")
                 if not isinstance(section, dict) or not isinstance(section.get("items"), list):
-                    raise ImmichAPIError("Invalid metadata search response")
-                # Older versions may ignore the unknown filter rather than reject it.
+                    raise ImmichAPIError("图片搜索返回格式无效")
                 if structured and self._search_api == "auto" and "nextCursor" not in section:
-                    self.logger.warning("Server returned legacy pagination; using legacy search")
+                    self.logger.warning("[扫描] 服务返回旧版分页格式，改用旧版搜索")
                     self._search_api = "legacy"
                     continue
                 if structured:
                     self._search_api = "structured"
+                if self.progress:
+                    self.progress.increment("scan_pages")
+                    self.progress.increment("scan_records", len(section["items"]))
+                candidates = []
                 for item in section["items"]:
+                    self._check_cancelled()
                     asset = Asset.model_validate(item)
                     if asset.id in seen:
+                        self._skip("重复记录")
                         continue
                     if asset.type != "IMAGE" or asset.isOffline or asset.isTrashed:
+                        self._skip("非图片或不可用")
                         continue
                     if library_id and asset.libraryId != library_id:
+                        self._skip("图库范围外")
                         continue
                     if asset.libraryId in excluded or (album_ids is not None and asset.id not in album_ids):
+                        self._skip("排除范围或相册外")
                         continue
                     if asset.tags is None:
-                        asset = self.get_asset(asset.id)
+                        if self.progress:
+                            self.progress.increment("detail_requests")
+                        try:
+                            asset = self.get_asset(asset.id, operation="read_details")
+                        except ImmichAPIError as error:
+                            if error.status_code != 404:
+                                raise
+                            self._skip("已删除")
+                            continue
                     if asset.tags is None:
-                        raise ImmichAPIError(f"Asset {asset.id} response omitted tags")
+                        raise ImmichAPIError(f"资产 {asset.id} 的响应缺少标签")
                     if asset.type != "IMAGE" or asset.isOffline or asset.isTrashed:
+                        self._skip("非图片或不可用")
                         continue
-                    if library_id and asset.libraryId != library_id:
-                        continue
-                    if asset.libraryId in excluded:
+                    if (library_id and asset.libraryId != library_id) or asset.libraryId in excluded:
+                        self._skip("图库范围外")
                         continue
                     if processed_tag_id and any(t.id == processed_tag_id for t in asset.tags):
+                        self._skip("已有完成标记")
                         continue
                     seen.add(asset.id)
-                    yield asset
+                    candidates.append(asset)
                 token_key = "nextCursor" if structured else "nextPage"
                 if token_key not in section:
-                    raise ImmichAPIError(f"Metadata response omitted {token_key}")
+                    raise ImmichAPIError(f"图片搜索响应缺少 {token_key}")
                 token = section[token_key]
+                if token is not None and (str(token) in tokens or not section["items"]):
+                    raise ImmichAPIError("图片搜索分页未推进 (pagination did not advance)")
+                yield candidates
                 if token is None:
                     break
-                if str(token) in tokens or not section["items"]:
-                    raise ImmichAPIError("Metadata pagination did not advance")
                 tokens.add(str(token))
                 if structured:
                     cursor = token

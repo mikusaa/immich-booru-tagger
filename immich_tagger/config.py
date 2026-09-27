@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     model_cache_dir: Path = Path("models")
     deepdanbooru_project_dir: Path | None = None
     state_dir: Path = Path("state")
+    english_tags_enabled: bool = True
     translations_enabled: bool = True
     translation_file: Path = Path(__file__).resolve().parent.parent / "data/tag_translations.json"
     translation_overrides: Path | None = None
@@ -44,6 +45,9 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=30, gt=0)
     tag_cache_ttl: int = Field(default=300, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_progress_interval_seconds: int = Field(default=10, ge=1)
+    log_slow_operation_seconds: int = Field(default=60, ge=1)
+    resume_on_startup: bool = True
     health_port: int = Field(default=8000, ge=1, le=65535)
     enable_scheduler: bool = True
     cron_schedule: str = "0 2 * * *"
@@ -96,6 +100,12 @@ class Settings(BaseSettings):
             raise ValueError("Set exactly one of IMMICH_API_KEY, IMMICH_API_KEYS, IMMICH_LIBRARIES")
         if self.immich_libraries and any(not n.strip() or not k.strip() for n, k in self.immich_libraries.items()):
             raise ValueError("Account names and API keys must not be empty")
+        return self
+
+    @model_validator(mode="after")
+    def validate_tag_languages(self):
+        if not self.english_tags_enabled and not self.translations_enabled:
+            raise ValueError("Enable at least one of ENGLISH_TAGS_ENABLED or TRANSLATIONS_ENABLED")
         return self
 
     @property

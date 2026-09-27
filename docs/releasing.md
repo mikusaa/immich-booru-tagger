@@ -28,3 +28,9 @@ docker build --platform linux/amd64 -t immich-booru-tagger:local .
 ```
 
 新增工作流文件不会自动产生镜像，必须等一次对应的 Actions 运行成功后，GHCR 中才会有可拉取的标签。
+
+## 1.0.0
+
+正式版本使用 Git 标签 `v1.0.0`，GHCR 镜像为 `ghcr.io/mikusaa/immich-booru-tagger:1.0.0`。Compose 和 `.env.example` 默认固定该版本。发布内容与升级说明见 [更新记录](../CHANGELOG.md)。
+
+发布前确认 `immich_tagger.__version__`、Compose 默认镜像和环境变量示例版本一致。推送版本标签后，等待测试、离线重启验收、运行镜像冒烟检查和 GHCR 推送全部成功，再创建 GitHub Release。不要覆盖已发布的版本标签；修复使用下一个补丁版本。

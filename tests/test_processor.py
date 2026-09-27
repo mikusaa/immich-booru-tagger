@@ -3,6 +3,7 @@ import json
 import pytest
 
 from immich_tagger.processor import ImmichAutoTagger
+from immich_tagger.models import TagPrediction
 from immich_tagger.state import writer_lock
 from immich_tagger.tagging_engine import TaggingEngineError
 from conftest import FakeEngine, FakeImmich, asset, tag
@@ -56,7 +57,10 @@ def test_total_limit_across_accounts(settings, kwargs, expected):
         worker.close()
 
 
-def test_dry_run_no_writes_or_state_and_no_marker(settings):
+@pytest.mark.parametrize("english", [False, True])
+def test_dry_run_no_writes_or_state_and_no_marker(settings, english, caplog):
+    settings.english_tags_enabled = english
+    caplog.set_level("INFO")
     server = FakeImmich([asset(0)])
     worker = processor(settings, server, dry_run=True)
     try:
@@ -64,6 +68,69 @@ def test_dry_run_no_writes_or_state_and_no_marker(settings):
         assert not server.writes
         assert not settings.state_dir.exists()
         assert not server.tags
+        preview = next(record.message for record in caplog.records if "计划添加：" in record.message)
+        paths, _ = json.JSONDecoder().raw_decode(preview.split("计划添加：", 1)[1])
+        assert "属性/蓝发" in paths
+        assert ("blue_hair" in paths) is english
+        assert ("hatsune_miku" in paths) is english
+        assert "auto:processed" not in paths
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("english,chinese", [(True, True), (False, True), (True, False)])
+def test_selected_languages_missing_translations_and_existing_tags(settings, tmp_path, english, chinese):
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"tags": {
+        "blue_hair": {"zh": "蓝发", "kind": "general"},
+        "hatsune_miku": {"zh": "", "kind": "character"},
+        "general": {"zh": "全年龄", "kind": "rating"},
+    }}))
+    settings.translation_file = catalog
+    settings.english_tags_enabled = english
+    settings.translations_enabled = chinese
+
+    class Engine(FakeEngine):
+        def predict_tags(self, image):
+            return super().predict_tags(image) + [
+                TagPrediction(name="unknown_tag", confidence=.8),
+                TagPrediction(name="general", confidence=.9, kind="rating"),
+            ]
+
+    existing = {"preexisting_english_tag", "手工标签"}
+    server = FakeImmich([asset(0, tags=list(map(tag, existing)))])
+    worker = processor(settings, server, engine=Engine())
+    try:
+        assert worker.run().processed == 1
+        expected = existing | {"auto:processed"}
+        if english:
+            expected |= {"blue_hair", "hatsune_miku", "unknown_tag", "general"}
+        if chinese:
+            expected |= {"属性/蓝发", "评级/全年龄"}
+            assert set(worker.catalog.missing) == {"hatsune_miku", "unknown_tag"}
+        else:
+            assert worker._catalog is None
+        assert {t["value"] for t in server.assets["0"]["tags"]} == expected
+        journal = json.loads((settings.state_dir / "assignments.jsonl").read_text())
+        assert set(journal["added"]) == expected - existing - {"auto:processed"}
+        writes = len(server.writes)
+        assert worker.run().attempted == 0
+        assert len(server.writes) == writes
+    finally:
+        worker.close()
+
+
+def test_chinese_only_without_translations_marks_processed(settings, tmp_path):
+    settings.english_tags_enabled = False
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text('{"tags": {}}')
+    settings.translation_file = catalog
+    server = FakeImmich([asset(0)])
+    worker = processor(settings, server)
+    try:
+        assert worker.run().processed == 1
+        assert {t["value"] for t in server.assets["0"]["tags"]} == {"auto:processed"}
+        assert set(worker.catalog.missing) == {"blue_hair", "hatsune_miku"}
     finally:
         worker.close()
 
@@ -101,7 +168,9 @@ def test_permanent_failures_do_not_block_later_pages(settings):
 
 
 @pytest.mark.parametrize("existing_chinese", [[], ["zh/属性/蓝发", "zh/角色/初音未来"]])
-def test_backfill_without_model_or_download_and_repeat_safe(settings, existing_chinese):
+@pytest.mark.parametrize("english", [False, True])
+def test_backfill_without_model_or_download_and_repeat_safe(settings, existing_chinese, english):
+    settings.english_tags_enabled = english
     server = FakeImmich([asset(0, tags=[tag("blue_hair"), tag("hatsune_miku"), tag("auto:processed"),
                                       tag("unknown_manual_tag"), *map(tag, existing_chinese)])])
     def no_engine(_):
@@ -132,6 +201,34 @@ def test_model_loading_error_aborts_without_poisoning_asset_failures(settings):
         assert not server.writes
         assert not worker.failure_tracker(worker.clients[0]).failures
         assert worker.last_error == "No model available"
+    finally:
+        worker.close()
+
+
+def test_changing_output_language_starts_new_run(settings):
+    class BrokenEngine(FakeEngine):
+        def prepare(self):
+            raise TaggingEngineError("No model available")
+
+    server = FakeImmich([asset(0)])
+    worker = processor(settings, server, engine=BrokenEngine())
+    try:
+        with pytest.raises(TaggingEngineError):
+            worker.run()
+        previous_run_id = worker.get_metrics()["progress"]["run_id"]
+        assert worker.has_pending_run()
+    finally:
+        worker.close()
+    settings.english_tags_enabled = False
+    worker = processor(settings, server)
+    try:
+        assert not worker.has_pending_run()
+        assert worker.run().processed == 1
+        assert worker.get_metrics()["progress"]["run_id"] != previous_run_id
+        paths = {t["value"] for t in server.assets["0"]["tags"]}
+        assert "属性/蓝发" in paths
+        assert "blue_hair" not in paths
+        assert "hatsune_miku" not in paths
     finally:
         worker.close()
 

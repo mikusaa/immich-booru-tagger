@@ -1,10 +1,12 @@
 # Immich Booru Tagger
 
+当前稳定版：**1.0.0**。
+
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
 它以独立容器运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
 
-英文标签会保留，中文标签作为额外标签写入 Immich。例如：
+默认同时写入英文标签和中文层级标签，可通过 `ENGLISH_TAGS_ENABLED=false` 关闭英文标签输出。例如，默认输出：
 
 ```text
 blue_hair
@@ -45,7 +47,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 指向 GHCR 镜像；仓库完成一次成功的 Actions 发布后即可直接拉取：
+默认 Compose 固定使用 GHCR 的 `1.0.0` 镜像：
 
 ```bash
 docker compose pull
@@ -80,7 +82,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-默认每天上海时间 02:00 执行，启动容器不会立即处理整库。模型与运行状态分别保存在 `models/` 和 `state/`，更新镜像时不会丢失。
+默认每天上海时间 02:00 执行；没有未完成任务时，启动容器不会立即处理整库。配置兼容的未完成任务默认启动即续跑。模型与运行状态分别保存在 `models/` 和 `state/`，更新镜像时不会丢失。
 
 ## 中文标签
 
@@ -92,7 +94,18 @@ docker compose logs -f
 评级/全年龄
 ```
 
-在 Immich 的“账户设置 → 功能 → 标签”中启用标签后，可在标签侧边栏展开“属性、角色、评级”。英文原标签、手工标签和 `auto:processed` 都会保留。
+在 Immich 的“账户设置 → 功能 → 标签”中启用标签后，可在标签侧边栏展开“属性、角色、评级”。
+
+只想新增中文标签时，在 `.env` 中设置：
+
+```env
+ENGLISH_TAGS_ENABLED=false
+TRANSLATIONS_ENABLED=true
+```
+
+模型仍生成英文标签供词典查询，但只把有译名的中文标签写入 Immich；缺少译名或被覆盖文件禁用的条目会跳过。该开关只影响后续新增标签，不删除已有英文或手工标签，也不影响 `auto:processed` 完成标记。已有完成标记的图片仍会跳过。英文和中文输出不能同时关闭。
+
+默认保留双语，是为了兼容标准 Booru 标签搜索与其他工具、保留缺少译名的识别结果，并支持更新词典后直接从已有英文标签补中文，无需重新推理。仅中文模式下，后续补全无法恢复没有保留下来的英文标签，需要重新推理。
 
 如果图片已经有英文标签，只想补中文，可以运行：
 
@@ -120,17 +133,19 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failu
 docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failures
 ```
 
-成功写入并回读确认后，程序才会添加 `auto:processed` 标记。部分标签写入失败时，下一轮会保留已成功的标签并补齐缺项。`state/` 同时保存失败记录、单写入锁和追加式写入记录，不要让多个容器共享同一状态目录并发运行。
+成功写入并回读确认后，程序才会添加 `auto:processed` 标记。部分标签写入失败时，下一轮会保留已成功的标签并补齐缺项。`state/` 同时保存 SQLite 候选队列、累计进度、失败记录、单写入锁和追加式写入记录，不要让多个容器共享同一状态目录并发运行。
+
+运行日志使用中文，默认每 10 秒显示当前阶段、扫描或处理进度、当前操作与耗时。已扫描完成的任务重启后直接处理剩余队列；扫描中断则重新核对候选并去重。实时进度见 `curl -s http://127.0.0.1:8000/metrics`，离线任务摘要使用 `--progress-status`。旧版首次升级仍需扫描，具体迁移与回退方法见 [完整配置](docs/configuration.md)。
 
 ## 镜像与平台
 
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:main
+ghcr.io/mikusaa/immich-booru-tagger:1.0.0
 ```
 
-推送版本标签（如 `v1.0.0`）会生成版本标签和 `latest`。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.0.0`，对应镜像标签 `1.0.0`；`1.0` 和 `latest` 会随正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
 ## 文档
 

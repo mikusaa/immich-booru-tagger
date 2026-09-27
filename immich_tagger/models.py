@@ -39,6 +39,7 @@ class AssetProcessingResult(BaseModel):
     tags_assigned: list[str] = Field(default_factory=list)
     processing_time: float = 0
     error: str | None = None
+    reason: str | None = None
 
 
 class RunResult(BaseModel):

@@ -39,6 +39,8 @@ docker run --rm --network none immich-booru-tagger:test
 - `tagging_engine.py`：WD14 默认后端与可选 DeepDanbooru 后端。
 - `translation_catalog.py`：离线词典、覆盖项和 `属性/`、`角色/`、`评级/` 路径生成。
 - `state.py`：单写入锁和追加式写入记录。
+- `task_store.py`：SQLite 任务队列、失败迁移和逐张原子检查点。
+- `progress.py`：线程安全状态、中文阶段日志和独立报告线程。
 - `health_server.py`：基于进程快照的 `/health` 与 `/metrics`。
 
 处理前会先保存候选快照，再执行写入，避免旧版按页搜索在标签写入后改变分页结果。常规模式只把 `auto:processed` 作为完成标记；中文补全不添加这个标记。
@@ -60,3 +62,16 @@ python scripts/build_catalog.py \
 DeepDanbooru 不装进默认 CPU 镜像，也不会自动下载项目目录。在独立环境安装 `requirements-deepdanbooru.txt`，设置 `TAGGING_MODEL=deepdanbooru` 与 `DEEPDANBOORU_PROJECT_DIR` 后再运行。该后端目前只有代码适配，未纳入真实模型验收。
 
 根目录的 `cleanup_failed_assets.py` 是独立的资产清理工具，不属于标签处理流程，也不打包进运行镜像。识别失败时应先排查模型、网络和图片格式。
+
+## 中断恢复验收
+
+`tests/test_process_restart.py` 启动真实子进程，在扫描、模型准备、推理、写入标签、写入完成标记和本地提交前后发送 SIGTERM / SIGKILL，使用同一数据库恢复并校验无重复写入、无需重新扫描及累计额度。
+
+容器级验收使用模拟 Immich 和模型，容器无外部网络，不涉及真实账号：
+
+```bash
+docker build --target test -t immich-booru-tagger:progress-test .
+python scripts/check_container_restart.py --image immich-booru-tagger:progress-test
+```
+
+脚本创建临时挂载目录与随机命名的测试容器，分别验证正常停止、强制结束、扫描中断后重建容器续跑；结束时仅清理本次创建的测试资源。实时 `/metrics` 在阻塞期间也会被检查。生产发布仍使用既有 `linux/amd64` runtime 构建及离线模型依赖冒烟检查。

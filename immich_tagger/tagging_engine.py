@@ -3,6 +3,7 @@ import csv
 import io
 import os
 from pathlib import Path
+from contextlib import nullcontext
 
 from .models import TagPrediction
 
@@ -14,6 +15,7 @@ class TaggingEngineError(RuntimeError):
 class WD14TaggingEngine:
     def __init__(self, settings):
         self.settings = settings
+        self.progress = None
         self.tagger = None
 
     def prepare(self):
@@ -21,12 +23,15 @@ class WD14TaggingEngine:
             return
         os.environ["HF_HUB_CACHE"] = str(self.settings.model_cache_dir.resolve())
         try:
-            from wdtagger import LabelData, Tagger
-            from huggingface_hub import hf_hub_download
-            tagger = Tagger(model_repo=self.settings.model_repo, cache_dir=self.settings.model_cache_dir)
+            with self.progress.operation("import_model") if self.progress else nullcontext():
+                from wdtagger import LabelData, Tagger
+                from huggingface_hub import hf_hub_download
+            with self.progress.operation("load_model") if self.progress else nullcontext():
+                tagger = Tagger(model_repo=self.settings.model_repo, cache_dir=self.settings.model_cache_dir)
             # wdtagger bundles one vocabulary; alternate models need their own ordered labels.
-            label_file = hf_hub_download(self.settings.model_repo, "selected_tags.csv",
-                                         cache_dir=self.settings.model_cache_dir)
+            with self.progress.operation("load_labels") if self.progress else nullcontext():
+                label_file = hf_hub_download(self.settings.model_repo, "selected_tags.csv",
+                                             cache_dir=self.settings.model_cache_dir)
             with open(label_file, encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             expected = getattr(tagger.model, "num_classes", len(rows))
@@ -71,16 +76,19 @@ class WD14TaggingEngine:
 class DeepDanbooruTaggingEngine:
     def __init__(self, settings):
         self.settings = settings
+        self.progress = None
         self.model = None
 
     def prepare(self):
         if self.model is None:
             try:
-                import deepdanbooru as dd
+                with self.progress.operation("import_model") if self.progress else nullcontext():
+                    import deepdanbooru as dd
                 path = self.settings.deepdanbooru_project_dir
                 if path is None or not Path(path).is_dir():
                     raise TaggingEngineError("DeepDanbooru requires DEEPDANBOORU_PROJECT_DIR")
-                self.model, self.tags = dd.project.load_project(str(path), compile_model=False)
+                with self.progress.operation("load_model") if self.progress else nullcontext():
+                    self.model, self.tags = dd.project.load_project(str(path), compile_model=False)
             except Exception as error:
                 raise TaggingEngineError(f"Cannot load DeepDanbooru: {error}") from error
 
