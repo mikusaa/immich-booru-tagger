@@ -1,12 +1,12 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.0.1**。
+当前稳定版：**1.1.0**。新增三种语言输出和一次性英文清理；从 `1.0.x` 升级须迁移语言配置，见下方说明。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
 它以独立容器运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
 
-默认同时写入英文标签和中文层级标签，可通过 `ENGLISH_TAGS_ENABLED=false` 改为优先中文、缺少译名时使用英文。例如，默认输出：
+默认同时写入英文标签和中文层级标签，可通过 `TAG_LANGUAGE_MODE=chinese` 改为优先中文、缺少译名时使用英文。例如，默认输出：
 
 ```text
 blue_hair
@@ -47,7 +47,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.0.1` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.1.0` 镜像：
 
 ```bash
 docker compose pull
@@ -99,11 +99,10 @@ docker compose logs -f
 希望有中文就只新增中文、没有中文时使用英文，在 `.env` 中设置：
 
 ```env
-ENGLISH_TAGS_ENABLED=false
-TRANSLATIONS_ENABLED=true
+TAG_LANGUAGE_MODE=chinese
 ```
 
-模型仍生成英文标签供词典查询：有译名时只写中文，缺少译名或覆盖文件将译名设为空时写英文。例如 `blue_hair` 写为 `属性/蓝发`，没有译名的标签保留原文。该开关只影响后续新增标签，不删除已有英文或手工标签，也不影响 `auto:processed` 完成标记。已有完成标记的图片仍会跳过。英文和中文输出不能同时关闭。
+模型仍生成英文标签供词典查询：有译名时只写中文，缺少译名或覆盖文件将译名设为空时写英文。例如 `blue_hair` 写为 `属性/蓝发`，没有译名的标签保留原文。该开关只影响后续新增标签，不删除已有英文或手工标签，也不影响 `auto:processed` 完成标记。已有完成标记的图片仍会跳过。`TAG_LANGUAGE_MODE` 还支持 `bilingual`（默认，中英）和 `english`（仅英文）。旧的两个语言开关已移除，配置仍有旧键时会拒绝启动并提示迁移。
 
 默认保留双语，是为了兼容标准 Booru 标签搜索与其他工具，并支持更新词典后直接从已有英文标签补中文，无需重新推理。优先中文模式也会保留缺少译名的识别结果，这些英文标签以后可以补中文；已输出中文而未保留英文的条目，后续更换译名需要重新推理或手动整理。
 
@@ -117,6 +116,50 @@ docker compose run --rm immich-tagger \
 ```
 
 补全模式不需要下载图片或加载推理模型，会遵守配置的图库/相册范围，重复运行只补缺少的中文标签。旧版 `zh/...` 标签不会自动删除；需要清理时请在 Immich 中手动处理。
+
+## 一次性清理旧英文
+
+先把日常输出设为 `TAG_LANGUAGE_MODE=chinese`。如果对应中文已经存在，可直接清理；否则先单独运行上面的 `backfill-zh`。两项操作都不加载模型，耗时主要取决于读取资产和 API 写入次数，不能保证清理一定更快。
+
+```bash
+# 预览（不加确认参数时也默认预览）
+docker compose run --rm immich-tagger \
+  python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --dry-run
+
+# 实际清理；大批量操作前先停止定时服务，避免占用同一状态目录的写入锁
+docker compose stop immich-tagger
+docker compose run --rm immich-tagger \
+  python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english
+docker compose up -d
+```
+
+- `recorded`（默认）：从 `state/assignments.jsonl` 读取本账号曾由程序新增的标签，直接检查记录中的图片，不搜索整库。记录缺失或损坏会报错；记录不完整的条目不会清理。
+- `catalog`：显式传入 `--cleanup-scope catalog`，扫描配置范围内的图片，清理词典中已有中文对应项的英文标签。可覆盖没有历史记录的标签，也会处理同名手工英文标签。
+
+两种方式都遵守图库/相册和排除范围；没有 include 时处理账号可见图片。只有图片当前已存在对应的 `属性/...`、`角色/...` 或 `评级/...` 标签才会解除英文关联。无译名、空译名、自定义完成标记、`auto:processed`、旧版 `zh/...` 都保留。不会删除图片或全局标签对象，因此标签侧边栏仍可能留下空的英文标签。
+
+实际执行必须带 `--confirm-cleanup-english`，与 `--dry-run` 互斥。支持 `--limit`、断点续跑和失败重试；重启后需要重新执行同一条确认命令，定时服务不会自动恢复清理任务。清理记录保存在 `state/cleanup.jsonl`，删除前保存 `prepared`，回读成功后保存同一操作 ID 的 `confirmed`。中断后只有 `prepared` 的操作结果尚未确认，人工恢复时应先检查实际关联，详见 [清理与恢复](docs/configuration.md#一次性英文清理)。
+
+Immich 的异步元数据任务可能在删除后重新写回标签。清理会在逐项删除间留出间隔，并在整张图片上连续做两次延迟回读；发现英文重新出现时，重新检查中文与范围后有限重试。持续不一致会记录失败。每张图片因此有额外等待时间；复核通过表示当时的状态，后续外部元数据导入仍可能重新添加标签。
+
+## 从 1.0.x 升级
+
+先停止写入任务并备份 `state/`。删除 `.env` 中的 `ENGLISH_TAGS_ENABLED` / `TRANSLATIONS_ENABLED`，按 [迁移对照表](docs/configuration.md#语言配置迁移) 设置 `TAG_LANGUAGE_MODE`；保留原 `state/` 和 `models/` 挂载。
+
+在 `.env` 中更新镜像版本：
+
+```env
+TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.1.0
+```
+
+然后拉取镜像并重建容器：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+保留旧语言配置会导致启动报错。升级后旧版未完成队列会重新扫描，已有标签和完成标记保留；英文清理仍须单独执行，不会自动启动。
 
 ## 常用操作
 
@@ -142,10 +185,10 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failu
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.0.1
+ghcr.io/mikusaa/immich-booru-tagger:1.1.0
 ```
 
-正式版本使用 Git 标签 `v1.0.1`，对应镜像标签 `1.0.1`；`1.0` 和 `latest` 会随正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.1.0`，对应镜像标签 `1.1.0`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
 ## 文档
 

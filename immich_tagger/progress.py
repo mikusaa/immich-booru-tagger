@@ -14,7 +14,8 @@ PHASES = {"idle": "空闲", "recovering": "恢复", "scanning": "扫描", "prepa
 OPERATIONS = {"read_tags": "读取账号标签", "read_album": "读取相册成员", "search": "获取图片列表",
               "read_asset": "读取资产状态", "read_details": "补取图片标签", "download": "下载预览图",
               "inference": "模型推理", "translate": "翻译标签", "create_tags": "创建标签",
-              "assign_tags": "关联标签", "readback": "回读确认", "marker": "写入完成标记",
+              "assign_tags": "关联标签", "remove_tags": "解除英文标签关联", "read_assignments": "读取历史写入记录",
+              "readback": "回读确认", "marker": "写入完成标记",
               "import_model": "加载模型依赖", "load_model": "准备模型（可能检查或下载权重）",
               "load_labels": "准备模型词表", "catalog": "校验中文词典", "checkpoint": "保存任务进度"}
 

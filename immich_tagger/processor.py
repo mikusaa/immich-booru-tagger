@@ -69,14 +69,23 @@ class ImmichAutoTagger:
 
     @property
     def catalog(self):
-        if self._catalog is None and self.settings.translations_enabled:
+        if self._catalog is None:
             with self.progress.operation("catalog"):
                 self._catalog = TranslationCatalog(self.settings.translation_file, self.settings.translation_overrides)
         return self._catalog
 
+    def _task_kind(self, backfill):
+        return "backfill" if backfill else "inference"
+
+    def _task_label(self, backfill):
+        return "补充中文标签" if backfill else "自动打标签"
+
+    def _failure_scope(self, scope, backfill):
+        return scope + ("-zh" if backfill else "")
+
     def failure_tracker(self, client, backfill=False):
         scope = account_scope(self.settings, client.account)
-        return FailureTracker(scope + ("-zh" if backfill else ""), settings=self.settings)
+        return FailureTracker(self._failure_scope(scope, backfill), settings=self.settings)
 
     def _signature(self, *, backfill=False, limit=None, single=False, max_cycles=None):
         limits = [n for n in (limit, self.settings.batch_size if single else None,
@@ -85,16 +94,15 @@ class ImmichAutoTagger:
         s = self.settings
         # Reload local vocabulary on each run/check so edited overrides invalidate the queue.
         self._catalog = None
-        revision = self.catalog.revision if self.catalog else None
+        revision = self.catalog.revision if backfill or s.translations_enabled else None
         # Explicit allowlist: never serialize credentials or the complete Settings object.
         return fingerprint({
-            "pipeline_version": 1, "accounts": [account_scope(s, c.account) for c in self.clients],
+            "pipeline_version": 2, "accounts": [account_scope(s, c.account) for c in self.clients],
             "libraries": sorted(s.immich_include_library_ids), "albums": sorted(s.immich_include_album_ids),
             "excluded": sorted(s.immich_exclude_library_ids), "backfill": backfill, "maximum": maximum,
             "model": [s.tagging_model, s.model_repo, str(s.deepdanbooru_project_dir)],
             "thresholds": [s.effective_general_threshold, s.character_threshold],
-            "marker": s.processed_tag_name, "translations": s.translations_enabled,
-            "english_tags": s.english_tags_enabled,
+            "marker": s.processed_tag_name, "language_mode": s.tag_language_mode,
             "revision": revision, "failure_timeout": s.failure_timeout,
         }), maximum, revision
 
@@ -103,21 +111,16 @@ class ImmichAutoTagger:
             return False
         signature, _, _ = self._signature(**kwargs)
         with TaskStore(self.settings.state_dir, readonly=True) as store:
-            return store.find_pending("backfill" if kwargs.get("backfill") else "inference", signature) is not None
+            return store.find_pending(self._task_kind(kwargs.get("backfill")), signature) is not None
 
     def _paths(self, client, asset, backfill):
         if backfill:
             with self.progress.operation("translate"):
                 names = []
                 for tag in asset.tags or []:
-                    name = tag.path
-                    prefix, separator, leaf = name.partition("/")
-                    if (name == self.settings.processed_tag_name or prefix == "zh"
-                            or prefix in self.catalog.categories.values()):
+                    if tag.path == self.settings.processed_tag_name:
                         continue
-                    if separator and prefix in ("general", "character", "rating"):
-                        name = leaf
-                    translated = self.catalog.translate(name)
+                    translated = self.catalog.translate_path(tag.path)
                     if translated:
                         names.append(translated)
                 return list(dict.fromkeys(names))
@@ -125,7 +128,7 @@ class ImmichAutoTagger:
         with self.progress.operation("inference"):
             predictions = self.engine.predict_tags(image_data)
         names = [prediction.name for prediction in predictions] if self.settings.english_tags_enabled else []
-        if self.catalog:
+        if self.settings.translations_enabled:
             with self.progress.operation("translate"):
                 for prediction in predictions:
                     translated = self.catalog.translate(prediction.name)
@@ -208,6 +211,11 @@ class ImmichAutoTagger:
             if session_advance:
                 self.progress.increment("session_completed")
 
+    def _asset_pages(self, client, backfill):
+        marker = next((t for t in client.get_all_tags(use_cache=False)
+                       if t.path == self.settings.processed_tag_name), None)
+        return client.iter_asset_pages(processed_tag_id=None if backfill or marker is None else marker.id)
+
     def _scan(self, store, run, maximum, backfill):
         run_id = run["id"]
         generation = store.start_scan(run_id)
@@ -218,12 +226,10 @@ class ImmichAutoTagger:
             if self.cancelled.is_set():
                 raise ProcessingCancelled()
             self.progress.update(account=client.current_library_name)
-            marker = next((t for t in client.get_all_tags(use_cache=False)
-                           if t.path == self.settings.processed_tag_name), None)
             scope = account_scope(self.settings, client.account)
-            failure_scope = scope + ("-zh" if backfill else "")
+            failure_scope = self._failure_scope(scope, backfill)
             failures = (self.failure_tracker(client, backfill).failures if self.dry_run else store.failures(failure_scope))
-            for page in client.iter_asset_pages(processed_tag_id=None if backfill or marker is None else marker.id):
+            for page in self._asset_pages(client, backfill):
                 if self.cancelled.is_set():
                     raise ProcessingCancelled()
                 candidates = []
@@ -257,7 +263,7 @@ class ImmichAutoTagger:
         return run
 
     def _execute(self, store, signature, maximum, revision, backfill):
-        run, resumed = store.begin("backfill" if backfill else "inference", signature, revision)
+        run, resumed = store.begin(self._task_kind(backfill), signature, revision)
         run_id = run["id"]
         result = RunResult.model_validate_json(run["result"])
         self.progress.update(run_id=run_id, resumed=resumed, total=run["total"],
@@ -303,11 +309,12 @@ class ImmichAutoTagger:
                 item = self.process_asset(client, Asset(id=queued["asset_id"], type="IMAGE"), backfill=backfill)
                 with self.progress.operation("checkpoint"):
                     result = store.finish_item(run_id, queued["account"], item,
-                                               queued["account"] + ("-zh" if backfill else ""), self.settings.failure_timeout)
+                                               self._failure_scope(queued["account"], backfill), self.settings.failure_timeout)
                 self._publish_result(result, session_advance=True, scan_skipped=run["scan_skipped"])
                 status_label = {"processed": "成功", "skipped": "跳过", "planned": "预览", "failed": "失败"}[item.status]
                 self.progress.log(f"图片 ID：{item.asset_id}｜结果：{item.reason or status_label}｜耗时 {item.processing_time:.2f} 秒"
-                                  f"｜新增标签：{json.dumps(item.tags_assigned, ensure_ascii=False)}", logging.DEBUG)
+                                  f"｜新增标签：{json.dumps(item.tags_assigned, ensure_ascii=False)}"
+                                  f"｜移除标签：{json.dumps(item.tags_removed, ensure_ascii=False)}", logging.DEBUG)
             error = f"{result.failed} 张图片处理失败" if result.failed else None
             store.complete(run_id, error)
             with self._metrics_lock:
@@ -331,8 +338,6 @@ class ImmichAutoTagger:
             raise
 
     def run(self, *, backfill=False, limit=None, single=False, max_cycles=None):
-        if backfill and not self.settings.translations_enabled:
-            raise ProcessorError("中文补全需要启用 TRANSLATIONS_ENABLED")
         if self.cancelled.is_set():
             return self.last_result.model_copy()
         self.progress.reset()
@@ -340,7 +345,7 @@ class ImmichAutoTagger:
             self.running, self.last_error, self.last_result = True, None, RunResult()
         try:
             with self.progress.reporting():
-                self.progress.phase("recovering", "开始任务｜" + ("补充中文标签" if backfill else "自动打标签")
+                self.progress.phase("recovering", "开始任务｜" + self._task_label(backfill)
                                     + ("｜仅预览" if self.dry_run else "｜正式写入"))
                 if not self.settings.immich_include_library_ids and not self.settings.immich_include_album_ids:
                     self.progress.log("未限制图库或相册，将处理账号可见的图片；排除规则仍然生效", logging.WARNING)

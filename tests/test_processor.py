@@ -59,7 +59,7 @@ def test_total_limit_across_accounts(settings, kwargs, expected):
 
 @pytest.mark.parametrize("english", [False, True])
 def test_dry_run_no_writes_or_state_and_no_marker(settings, english, caplog):
-    settings.english_tags_enabled = english
+    settings.tag_language_mode = "bilingual" if english else "chinese"
     caplog.set_level("INFO")
 
     class Engine(FakeEngine):
@@ -93,8 +93,7 @@ def test_selected_languages_missing_translations_and_existing_tags(settings, tmp
         "general": {"zh": "全年龄", "kind": "rating"},
     }}))
     settings.translation_file = catalog
-    settings.english_tags_enabled = english
-    settings.translations_enabled = chinese
+    settings.tag_language_mode = "bilingual" if english and chinese else "english" if english else "chinese"
 
     class Engine(FakeEngine):
         def predict_tags(self, image):
@@ -127,7 +126,7 @@ def test_selected_languages_missing_translations_and_existing_tags(settings, tmp
 
 
 def test_chinese_preferred_without_translations_falls_back_to_english(settings, tmp_path):
-    settings.english_tags_enabled = False
+    settings.tag_language_mode = "chinese"
     catalog = tmp_path / "catalog.json"
     catalog.write_text('{"tags": {}}')
     settings.translation_file = catalog
@@ -174,9 +173,9 @@ def test_permanent_failures_do_not_block_later_pages(settings):
 
 
 @pytest.mark.parametrize("existing_chinese", [[], ["zh/属性/蓝发", "zh/角色/初音未来"]])
-@pytest.mark.parametrize("english", [False, True])
-def test_backfill_without_model_or_download_and_repeat_safe(settings, existing_chinese, english):
-    settings.english_tags_enabled = english
+@pytest.mark.parametrize("language_mode", ["bilingual", "chinese", "english"])
+def test_backfill_without_model_or_download_and_repeat_safe(settings, existing_chinese, language_mode):
+    settings.tag_language_mode = language_mode
     server = FakeImmich([asset(0, tags=[tag("blue_hair"), tag("hatsune_miku"), tag("auto:processed"),
                                       tag("unknown_manual_tag"), *map(tag, existing_chinese)])])
     def no_engine(_):
@@ -225,7 +224,7 @@ def test_changing_output_language_starts_new_run(settings):
         assert worker.has_pending_run()
     finally:
         worker.close()
-    settings.english_tags_enabled = False
+    settings.tag_language_mode = "chinese"
     worker = processor(settings, server)
     try:
         assert not worker.has_pending_run()

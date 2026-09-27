@@ -23,7 +23,7 @@ SEARCH_API=auto
 
 列表也可以写成 JSON 数组。图库 include 取并集，相册 include 取并集；两者同时设置时取交集；exclude 始终优先。没有 include 范围时会处理 API 用户可见的所有图片并打印警告。上传资产可能没有 `libraryId`，此时应通过相册范围限制。
 
-程序只接受图片，并跳过离线、回收站和已删除资产。常规推理会跳过带有 `PROCESSED_TAG_NAME` 的资产；中文补全会检查已经处理过的资产。
+程序只接受图片，并跳过离线、回收站和已删除资产。常规推理会跳过带有 `PROCESSED_TAG_NAME` 的资产；中文补全和英文清理会检查已经处理过的资产。
 
 ## 环境变量
 
@@ -46,8 +46,7 @@ SEARCH_API=auto
 | `MODEL_CACHE_DIR` | `/app/models` | 模型和词表缓存目录 |
 | `DEEPDANBOORU_PROJECT_DIR` | 空 | DeepDanbooru 项目目录 |
 | `STATE_DIR` | `/app/state` | SQLite 任务队列、失败记录、锁和写入日志 |
-| `ENGLISH_TAGS_ENABLED` | `true` | 是否始终写入模型的英文标签；关闭后优先中文，缺少译名时使用英文 |
-| `TRANSLATIONS_ENABLED` | `true` | 是否添加中文标签 |
+| `TAG_LANGUAGE_MODE` | `bilingual` | `bilingual`（中英）、`chinese`（中文优先，缺译名回退英文）、`english`（仅英文） |
 | `TRANSLATION_OVERRIDES` | 空 | 自定义译名 JSON 文件 |
 | `MAX_RETRIES` / `RETRY_DELAY` | `3` / `1` | HTTP 重试次数和退避秒数 |
 | `REQUEST_TIMEOUT` | `30` | 单次 HTTP 请求超时秒数 |
@@ -64,16 +63,19 @@ SEARCH_API=auto
 
 `BATCH_SIZE` 是搜索分页大小，不代表推理并发数。WD14 的评级标签使用专门阈值，普通标签使用 `GENERAL_THRESHOLD`。
 
-标签语言可以按下表组合，至少启用一种输出：
+语言模式只控制后续新增标签，不删除已有标签。常规推理仍使用 `PROCESSED_TAG_NAME` 完成标记，并跳过已处理资产；中文优先模式在所有预测都缺少译名时写入英文并标记完成。显式的 `backfill-zh` 和 `cleanup-english` 独立于日常语言模式，始终读取中文词典。
 
-| `ENGLISH_TAGS_ENABLED` | `TRANSLATIONS_ENABLED` | 新增标签 |
+### 语言配置迁移
+
+旧的两个变量已移除。即使同时设置新变量，环境或所加载 `.env` 文件中仍有旧键（包括空值）也会报错，须删除旧键：
+
+| 旧 `ENGLISH_TAGS_ENABLED` | 旧 `TRANSLATIONS_ENABLED` | 新 `TAG_LANGUAGE_MODE` |
 | --- | --- | --- |
-| `true` | `true` | 英文 + 中文（默认） |
-| `false` | `true` | 有译名时只写中文，缺少译名时写英文 |
-| `true` | `false` | 仅英文 |
-| `false` | `false` | 配置错误，启动时拒绝 |
+| `true` | `true` | `bilingual` |
+| `false` | `true` | `chinese` |
+| `true` | `false` | `english` |
 
-语言开关只控制后续新增标签，不删除已有标签。常规推理仍使用 `PROCESSED_TAG_NAME` 完成标记，并跳过已处理资产；所有预测都缺少译名时，会写入英文标签并记录本次推理已完成。`backfill-zh` 不受英文输出开关影响，仍从资产已有的英文标签补中文。
+未设置新变量时默认 `bilingual`；其他取值报错。不提供双关闭模式。`1.0.x` 镜像使用旧配置；三种语言模式与英文清理从 `1.1.0` 开始提供。升级会让旧版未完成推理/补全队列重新扫描，已有标签、完成标记和失败记录保留，SQLite 结构无需迁移。
 
 ## 运行模式
 
@@ -85,11 +87,43 @@ SEARCH_API=auto
 | `continuous` | 处理本轮所有候选后退出 |
 | `scheduler` | 按 cron 定时重复运行 |
 | `backfill-zh` | 从已有英文标签补中文，不加载模型 |
+| `cleanup-english` | 一次性解除已有中文对应项的英文关联，默认仅预览 |
 | `health-only` | 只提供健康检查服务 |
 
 附加参数：`--limit N` 限制所有账号合计处理数，`--batch-size N` 临时覆盖分页大小，`--library-id UUID` 临时指定包含图库，`--dry-run` 只预览标签计划。旧参数 `--max-cycles N` 仍可用，表示总上限 `N × BATCH_SIZE`。
 
 `--test-connection` 只读取标签列表；`--show-failures`、`--reset-failure ASSET_ID` 和 `--reset-failures` 管理失败记录；`--progress-status` 只读查询最近一次持久化任务摘要，输出 `source=persisted`、`live=false`、`running=null`；实时状态使用 `/metrics`。没有数据库时显示尚无记录，不创建状态目录。`--reset-progress` 已弃用，不会重置计数或删除队列。
+
+## 一次性英文清理
+
+`--mode cleanup-english` 使用独立的队列和失败记录，定时服务只处理常规推理，不执行或恢复清理。中文缺失时先执行 `backfill-zh`；清理命令本身不补中文、不下载图片、不加载模型。清理仍需读取当前标签并逐项解除关联，大库和标签较多时也需要时间。
+
+```bash
+# 查看前 20 张可清理图片的计划
+python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --dry-run --limit 20
+# 实际清理；同一条命令可在中断后重新运行续跑
+python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english
+# 历史记录不完整时，显式扩大到词典匹配项；先预览
+python -m immich_tagger.main --mode cleanup-english --cleanup-scope catalog --dry-run
+```
+
+`recorded` 默认读取 `state/assignments.jsonl`，按服务地址和 API Key 摘要匹配账号，逐张读取这些图片的当前标签和范围，避免整库搜索。文件缺失或任一行损坏会中止，不会自动切换到 `catalog`。更换 API Key 或地址后摘要改变，旧账号记录不会自动匹配；应保留原身份或审阅后显式使用 `catalog`。日志表示历史新增行为，无法判断用户后来删除又手工重加的同名标签。
+
+`catalog` 遵循既有图库/相册筛选，扫描词典匹配的英文标签；无需 `assignments.jsonl`，但会包含同名手工英文标签。两种模式都使用当前词典和覆盖文件，支持原始英文及 `general/`、`character/`、`rating/` 前缀；不凭 ASCII 字符判定来源。中文路径必须与当前译名完整一致，旧 `zh/...` 路径不算对应中文。无译名、空译名、中文层级、旧 `zh/...`、`auto:processed` 及自定义完成标记均保留。
+
+只有 `--confirm-cleanup-english` 才允许写入；未带此参数默认预览，`--dry-run` 与确认参数不能同时使用，清理参数不能用于其他模式。预览不写 Immich、正式队列、失败记录或清理日志。`--limit` / `--max-cycles` 限制整轮可清理图片数量，恢复不会补充额度。实际执行与常规打标签共用写入锁，应先停掉正在运行的写入任务。
+
+删除前重新检查资产范围和中文标签，使用 `DELETE /api/tags/{tagId}/assets`、请求体 `{"ids":["asset-id"]}`，只解除一个标签在该图片上的关联；检查响应中该资产的 `success` 并逐项回读确认。API Key 需要 `tag.asset` 和读取资产的权限，不需要 `tag.delete` 或资产删除权限。不会删除全局标签，所以可能留下空标签。
+
+Immich 会异步写入 XMP / 重建标签关联，立即回读成功的标签也可能随后重新出现。逐项解除间隔为 `RETRY_DELAY` 秒，至少 5 秒、最多 60 秒；每轮删除后对整张图片连续做两次延迟回读，每次等待至少 5 秒，并随本图片重试轮次指数退避、最多 60 秒。发现原计划内的英文重新出现时，重新核对中文和范围，最多重试 `MAX_RETRIES` 次；不会扩大到原计划之外的标签。复核无法保证后续外部元数据任务不再添加标签。
+
+HTTP 临时故障也按 `MAX_RETRIES` 重试；复核重试耗尽或其他单张处理失败计入独立失败记录，下次显式执行重试，达到 `FAILURE_TIMEOUT` 后暂停该图片。`--show-failures` / 重置命令包含 `cleanup-recorded` 和 `cleanup-catalog` 两类。鉴权或日志写入失败中止整轮。恢复时刷新相册范围、重读资产标签，已移除项不会再请求删除；清理范围、词典或历史写入记录变化会建立新队列。
+
+### 清理记录与人工恢复
+
+`state/cleanup.jsonl` 每项保存账号摘要、资产 ID、标签 ID、完整英文路径、对应中文路径、任务 ID、操作 ID 和 UTC 时间。每个删除请求前先追加并同步落盘 `status=prepared`，逐项回读成功后再追加相同 `operation_id` 的 `status=confirmed`。`confirmed` 表示该次回读时已移除，整张图片是否通过后续延迟复核应查看任务结果；只有 `prepared` 的操作也可能已执行，需以 Immich 实际标签为准。没有自动回滚命令。
+
+人工恢复时先停止清理，按账号核对清单和当前资产，筛选确需恢复且当前缺失的英文关联。全局标签仍存在时，通过 `PUT /api/tags/assets`，请求体 `{"assetIds":["asset-id"],"tagIds":["tag-id"]}` 恢复关联，并回读确认；如果标签对象已被另行删除，可按日志完整路径重新创建后关联。恢复关联不会移除中文。仅恢复本地状态目录不能撤销 Immich 上的删除。
 
 ## 中文词典与自定义译名
 
@@ -111,7 +145,7 @@ SEARCH_API=auto
 
 只有标签关联回读确认成功后，才会添加处理标记。部分写入失败时，重试会保留已成功的标签并补齐缺项；模型初始化失败会终止整轮，不把所有图片记为失败。达到 `FAILURE_TIMEOUT` 后，资产只会被跳过，修复原因后使用重置命令恢复。
 
-`state/progress.sqlite3` 保存候选队列、逐张结果和失败计数，`state/assignments.jsonl` 记录新增标签（账号只保存服务地址和 Key 的摘要），`state/writer.lock` 防止同一目录多进程同时写入。SQLite 使用 WAL，目录中的 `-wal`、`-shm` 文件属于数据库运行状态，不要在运行中删除。当前没有自动回滚命令。
+`state/progress.sqlite3` 保存候选队列、逐张结果和失败计数，`state/assignments.jsonl` 记录新增标签（账号只保存服务地址和 Key 的摘要），`state/writer.lock` 防止同一目录多进程同时写入。SQLite 使用 WAL，目录中的 `-wal`、`-shm` 文件属于数据库运行状态，不要在运行中删除。清理另有 `state/cleanup.jsonl` 记录；当前没有自动回滚命令。
 
 健康检查默认绑定宿主机 `127.0.0.1:8000`，提供 `/health` 和 `/metrics`。它们读取线程安全的进程快照，不主动请求 Immich 或加载模型；最近一轮失败时 `/health` 返回 503。仅等待较久不判为故障。正常健康检查访问不再打印访问日志，健康状态变化会单独提示。
 
@@ -123,7 +157,7 @@ curl -s http://127.0.0.1:8000/metrics
 docker compose run --rm immich-tagger python -m immich_tagger.main --progress-status
 ```
 
-日志时间使用 `TIMEZONE` 并带 UTC 偏移。阶段切换、重试和错误立即记录；运行时由独立报告线程定时显示状态，即使当前请求或模型调用尚未返回，也能看到操作名称和等待时间。默认 INFO 输出汇总，DEBUG 输出单张结果和标签明细；dry-run 始终在 INFO 显示计划添加的标签。
+日志时间使用 `TIMEZONE` 并带 UTC 偏移。阶段切换、重试和错误立即记录；运行时由独立报告线程定时显示状态，即使当前请求或模型调用尚未返回，也能看到操作名称和等待时间。默认 INFO 输出汇总，DEBUG 输出单张结果和标签明细；dry-run 始终在 INFO 显示计划添加的标签；清理预览显示待移除英文及对应中文。
 
 ```text
 2026-09-27 17:21:10+08:00 INFO [扫描] 已读取 12 页｜已读取记录 3000 条｜已选候选 2400 张｜补取详情 1850 次
@@ -141,7 +175,7 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --progress-st
 | `detail_requests` / `candidates` / `scan_skips` | 补取详情次数、已选候选、本地跳过原因计数 |
 | `total` / `completed` / `remaining` | 固定队列总量、已结束尝试数、剩余量；扫描结束前总量和剩余量为 `null` |
 | `session_completed` | 本次执行完成数；恢复时从零开始 |
-| `current_asset_id` / `operation` | 当前图片及操作代码，如 `search`、`read_details`、`load_model`、`download`、`inference`、`assign_tags`、`readback`、`checkpoint` |
+| `current_asset_id` / `operation` | 当前图片及操作代码，如 `search`、`read_details`、`load_model`、`download`、`inference`、`assign_tags`、`remove_tags`、`readback`、`checkpoint` |
 | `phase_elapsed_seconds` / `operation_elapsed_seconds` / `session_elapsed_seconds` | 当前阶段、操作及本次执行耗时，停机时间不计入 |
 | `assets_per_second` | 本次处理阶段完成数除以处理阶段耗时，排除扫描、模型准备和停机时间 |
 | `last_progress_at` / `next_run_at` | 最近实际推进时间、下一轮计划时间；定时状态日志不会刷新推进时间 |
@@ -156,7 +190,7 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --progress-st
 
 默认 `RESUME_ON_STARTUP=true`：兼容的未完成任务启动后立即恢复，恢复后不再额外执行 `RUN_ON_STARTUP` 新任务。设置为 false 只关闭立即恢复，下一次定时触发仍会优先续跑。`ENABLE_SCHEDULER=false` 只执行一轮，优先恢复；`health-only` 不恢复任务、不迁移状态、不调用 Immich。预览使用临时队列，不创建或更新正式恢复状态。
 
-账号身份或顺序、图库/相册范围、处理类型、模型、阈值、语言输出、词典内容、完成标记、失败策略、有效处理上限发生变化时，旧任务标记为已替代，新任务重新扫描。已有 Immich 标签仍然保留。日志设置、时区、cron、请求超时不影响续跑；分页大小仅在影响有效总上限时使任务不兼容。自动打标签和中文补全任务独立。
+账号身份或顺序、图库/相册范围、处理类型、模型、阈值、语言输出、词典内容、完成标记、失败策略、有效处理上限发生变化时，旧任务标记为已替代，新任务重新扫描。已有 Immich 标签仍然保留。日志设置、时区、cron、请求超时不影响续跑；分页大小仅在影响有效总上限时使任务不兼容。自动打标签、中文补全和英文清理任务独立。
 
 成功、失败、跳过与失败次数在同一 SQLite 事务中提交；单张失败本轮不无限重试，下一轮按失败策略重试。模型、词典、鉴权、数据库等任务级错误保留队列，不把所有图片记为失败。SIGTERM 停止领取新图片并尽量完成当前图片；被强制终止后从最后已提交结果继续。已结束任务仅保留最近 100 条汇总，未完成队列不自动清理。
 
@@ -169,7 +203,7 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --progress-st
    cp -a state state.before-progress-upgrade
    ```
 
-2. 更新镜像并启动，继续挂载原有 `state/` 和 `models/`。首次需要写状态时，旧 `failures-*.json` 在写入锁内一次性导入 SQLite，原文件保留作为备份。失败查询只读；导入后重置失败记录不会被旧 JSON 重新覆盖。
+2. 按上面的语言配置迁移表删除旧键并设置 `TAG_LANGUAGE_MODE`。更新到包含这些变更的镜像并启动，继续挂载原有 `state/` 和 `models/`。首次需要写状态时，旧 `failures-*.json` 在写入锁内一次性导入 SQLite，原文件保留作为备份。失败查询只读；导入后重置失败记录不会被旧 JSON 重新覆盖。
 3. **旧版没有保存候选队列，第一次升级仍需扫描。** Immich 完成标记和模型缓存继续有效。从新版建立并固定的队列开始，后续重启即可续跑。
 
 SQLite 已成为失败状态和任务队列的权威来源，不要继续修改备份 JSON。迁移失败、数据库损坏或版本不兼容会明确报错，不自动清空恢复数据。状态卷应使用支持本地文件锁的存储，备份时先停止写入服务并复制整个目录。
@@ -178,4 +212,4 @@ SQLite 已成为失败状态和任务队列的权威来源，不要继续修改�
 
 ## Immich 兼容性
 
-客户端优先使用带 `filter/orderBy/cursor` 的结构化搜索，自动模式在服务器返回 HTTP 400 或旧分页格式时回退到 `page/nextPage`。鉴权错误不会触发无范围回退。标签写入依赖 Immich 的 `PUT /api/tags` 和 `PUT /api/tags/assets`。
+客户端优先使用带 `filter/orderBy/cursor` 的结构化搜索，自动模式在服务器返回 HTTP 400 或旧分页格式时回退到 `page/nextPage`。鉴权错误不会触发无范围回退。标签写入依赖 Immich 的 `PUT /api/tags` 和 `PUT /api/tags/assets`；英文清理使用 `DELETE /api/tags/{tagId}/assets`。Immich 没有批量 `DELETE /api/tags/assets` 接口。

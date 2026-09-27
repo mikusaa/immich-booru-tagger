@@ -30,6 +30,10 @@ class ImmichAPIError(RuntimeError):
         self.status_code = status_code
 
 
+class TagRemovalIncompleteError(ImmichAPIError):
+    """The DELETE completed, but its association is still present on readback."""
+
+
 class ImmichClient:
     def __init__(self, settings: Settings | None = None, account=None, *, dry_run=False, transport=None):
         self.settings = settings or get_settings()
@@ -133,6 +137,17 @@ class ImmichClient:
     def get_asset(self, asset_id, *, operation="read_asset"):
         with self._operation(operation):
             return Asset.model_validate(self._make_request("GET", f"/api/assets/{asset_id}").json())
+
+    def untag_single_asset(self, asset_id, tag_id):
+        with self._operation("remove_tags"):
+            # Immich exposes removal per tag, not DELETE /tags/assets.
+            data = self._make_request("DELETE", f"/api/tags/{tag_id}/assets", json_data={"ids": [asset_id]}).json()
+            if (not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict)
+                    or data[0].get("id") != asset_id or data[0].get("success") is not True):
+                raise ImmichAPIError(f"标签解除接口未确认成功：{asset_id}")
+            actual = self.get_asset(asset_id, operation="readback")
+            if actual.tags is None or any(tag.id == tag_id for tag in actual.tags):
+                raise TagRemovalIncompleteError(f"标签解除回读不完整：{asset_id} (Tag removal incomplete)")
 
     @observed("download")
     def download_asset(self, asset_id, use_thumbnail=True):

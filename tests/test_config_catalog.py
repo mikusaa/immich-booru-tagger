@@ -36,18 +36,41 @@ def test_invalid_configuration_rejected(settings, values):
         Settings(_env_file=None, immich_base_url="http://test", **values)
 
 
-@pytest.mark.parametrize("english,chinese", [("true", "true"), ("false", "true"),
-                                            ("true", "false"), ("false", "false")])
-def test_tag_language_environment_configuration(settings, monkeypatch, english, chinese):
-    monkeypatch.setenv("ENGLISH_TAGS_ENABLED", english)
-    monkeypatch.setenv("TRANSLATIONS_ENABLED", chinese)
-    if english == chinese == "false":
-        with pytest.raises(ValidationError, match="ENGLISH_TAGS_ENABLED or TRANSLATIONS_ENABLED"):
-            Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+@pytest.mark.parametrize("mode", ["bilingual", "chinese", "english"])
+def test_tag_language_environment_configuration(settings, monkeypatch, mode):
+    monkeypatch.setenv("TAG_LANGUAGE_MODE", mode)
+    parsed = Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+    assert parsed.tag_language_mode == mode
+    assert parsed.english_tags_enabled is (mode != "chinese")
+    assert parsed.translations_enabled is (mode != "english")
+
+
+@pytest.mark.parametrize("legacy", ["ENGLISH_TAGS_ENABLED", "TRANSLATIONS_ENABLED"])
+@pytest.mark.parametrize("source", ["env", "dotenv", "init"])
+@pytest.mark.parametrize("value", ["false", ""])
+def test_removed_language_configuration_rejected(settings, monkeypatch, tmp_path, legacy, source, value):
+    options = dict(_env_file=None, immich_base_url="http://test", immich_api_key="private-key",
+                   tag_language_mode="chinese")
+    if source == "env":
+        monkeypatch.setenv(legacy, value)
+    elif source == "dotenv":
+        path = tmp_path / "custom.env"
+        path.write_text(f"export {legacy}={value}\n")
+        options["_env_file"] = path
     else:
-        parsed = Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
-        assert parsed.english_tags_enabled is (english == "true")
-        assert parsed.translations_enabled is (chinese == "true")
+        options[legacy.lower()] = False
+    with pytest.raises(ValueError, match="TAG_LANGUAGE_MODE") as error:
+        Settings(**options)
+    assert "private-key" not in str(error.value)
+
+
+def test_language_default_invalid_and_disabled_env_file(settings, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ENGLISH_TAGS_ENABLED=false\n")
+    values = dict(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+    assert Settings(**values).tag_language_mode == "bilingual"
+    with pytest.raises(ValidationError):
+        Settings(**values, tag_language_mode="invalid")
 
 
 def test_help_without_credentials_or_machine_learning_dependencies(settings, tmp_path):
@@ -56,6 +79,7 @@ def test_help_without_credentials_or_machine_learning_dependencies(settings, tmp
                             cwd=tmp_path, env={**os.environ, "PYTHONPATH": root}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "backfill-zh" in result.stdout
+    assert "cleanup-english" in result.stdout
     result = subprocess.run([sys.executable, "-c", "import sys; import immich_tagger.main; "
                              "assert 'torch' not in sys.modules; assert 'wdtagger' not in sys.modules"],
                             cwd=tmp_path, env={**os.environ, "PYTHONPATH": root}, capture_output=True, text=True)

@@ -39,3 +39,11 @@ class TranslationCatalog:
         if any(c in label for c in "\n\r\t"):
             raise ValueError(f"Translation contains control characters: {name}")
         return f"{category}/{label}"
+
+    def translate_path(self, path):
+        prefix, separator, leaf = path.partition("/")
+        if prefix == "zh" or prefix in self.categories.values():
+            return None
+        if separator and prefix in self.categories:
+            path = leaf
+        return self.translate(path)

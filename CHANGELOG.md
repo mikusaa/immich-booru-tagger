@@ -1,5 +1,23 @@
 # 更新记录
 
+## 1.1.0 — 2026-09-28
+
+新增三种语言输出和一次性英文关联清理，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.1.0`（Linux AMD64 / CPU）。本次升级需要迁移旧语言配置。
+
+- 用 `TAG_LANGUAGE_MODE=bilingual/chinese/english` 统一语言输出；中文优先仍保留没有译名的英文。旧 `ENGLISH_TAGS_ENABLED` / `TRANSLATIONS_ENABLED` 已移除，存在旧键时启动报错并提示迁移。
+- 新增一次性 `cleanup-english`：默认按 `assignments.jsonl` 的历史记录筛选，也可显式选择词典范围；只解除已有关联中文的英文标签，不删图片或全局标签。
+- 默认只预览，实际执行需 `--confirm-cleanup-english`。删除前写入并同步清理清单，回读后记录确认；复用独立持久队列、范围检查和失败重试，定时任务不恢复清理。
+- 验证 Immich 官方解关联接口为 `DELETE /api/tags/{tagId}/assets`（`tag.asset` 权限）。
+- 真实图库测试发现立即回读后仍可能由异步元数据任务恢复英文关联；增加逐项间隔、两次整张延迟复核及有限重试，并检查接口响应中的逐项成功状态。
+
+### 升级说明
+
+停止写入任务并备份 `state/`，删除两个旧语言变量：原 `true/true` 改为 `bilingual`，`false/true` 改为 `chinese`，`true/false` 改为 `english`。保留状态和模型挂载。SQLite 结构保持兼容，旧版未完成任务首次升级会重新扫描；已有完成标记继续避免重复推理。
+
+将 `.env` 的 `TAGGER_IMAGE` 改为 `ghcr.io/mikusaa/immich-booru-tagger:1.1.0` 后执行 `docker compose pull` 和 `docker compose up -d`。先补中文，再预览英文清理；只有图片已经具有当前词典对应中文标签时才移除英文。完整使用和人工恢复方法见 [配置文档](docs/configuration.md#一次性英文清理)。
+
+本地及 Linux AMD64 容器均通过 157 项测试；在 Immich 3.2.2 完成单张 15 个英文关联的实际清理、重复运行和恢复核验。异步回写可能导致等待和重试，批量操作前仍应小范围验证。
+
 ## 1.0.1 — 2026-09-27
 
 修复中文优先模式下未翻译标签丢失的问题，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.0.1`（Linux AMD64 / CPU）。

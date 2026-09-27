@@ -37,6 +37,7 @@ class AssetProcessingResult(BaseModel):
     success: bool = False
     status: Literal["processed", "skipped", "planned", "failed"] = "failed"
     tags_assigned: list[str] = Field(default_factory=list)
+    tags_removed: list[str] = Field(default_factory=list)
     processing_time: float = 0
     error: str | None = None
     reason: str | None = None

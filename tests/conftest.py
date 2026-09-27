@@ -23,6 +23,8 @@ def tag(name):
 
 @pytest.fixture
 def settings(tmp_path, monkeypatch):
+    for key in ("ENGLISH_TAGS_ENABLED", "TRANSLATIONS_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
     for key in Settings.model_fields:
         monkeypatch.delenv(key.upper(), raising=False)
     return Settings(_env_file=None, immich_base_url="http://immich.test", immich_api_key="test-key",
@@ -42,6 +44,7 @@ class FakeImmich:
         self.ignore_filters = False
         self.incomplete_upsert = False
         self.drop_assignment = False
+        self.drop_removal = False
         self.error_status = None
 
     def factory(self, settings, account, *, dry_run=False):
@@ -67,6 +70,7 @@ class FakeImmich:
                 self.tags.setdefault(name, tag(name))
             return httpx.Response(200, json=[self.tags[name] for name in names])
         if path == "/api/tags/assets":
+            assert request.method == "PUT"
             if not self.drop_assignment:
                 tags_by_id = {t["id"]: t for t in self.tags.values()}
                 for identifier in body["assetIds"]:
@@ -75,6 +79,13 @@ class FakeImmich:
                         if tid not in {t["id"] for t in current}:
                             current.append(tags_by_id[tid])
             return httpx.Response(200, json={"count": len(body["tagIds"])})
+        if path.startswith("/api/tags/") and path.endswith("/assets"):
+            assert request.method == "DELETE"
+            tid = path[len("/api/tags/"):-len("/assets")]
+            if not self.drop_removal:
+                for identifier in body["ids"]:
+                    self.assets[identifier]["tags"] = [t for t in self.assets[identifier]["tags"] if t["id"] != tid]
+            return httpx.Response(200, json=[{"id": i, "success": True} for i in body["ids"]])
         if path == "/api/search/metadata":
             structured = "filter" in body
             if structured and self.reject_structured:
@@ -101,7 +112,9 @@ class FakeImmich:
         if path.endswith("/thumbnail"):
             return httpx.Response(200, content=b"fake-image")
         if path.startswith("/api/assets/"):
-            return httpx.Response(200, json=self.assets[path.rsplit("/", 1)[1]])
+            identifier = path.rsplit("/", 1)[1]
+            return (httpx.Response(200, json=self.assets[identifier]) if identifier in self.assets
+                    else httpx.Response(404))
         raise AssertionError(f"Unexpected request: {request.method} {path}")
 
 

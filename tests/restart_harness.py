@@ -11,7 +11,8 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
-from conftest import FakeEngine, FakeImmich, asset
+from conftest import FakeEngine, FakeImmich, asset, tag
+from immich_tagger.cleanup import EnglishTagCleaner
 from immich_tagger.config import Settings
 from immich_tagger.logging import setup_logging
 from immich_tagger.main import parse_arguments, run_service
@@ -24,6 +25,7 @@ def main():
     parser.add_argument('directory', type=Path)
     parser.add_argument('--block', default='')
     parser.add_argument('--service', action='store_true')
+    parser.add_argument('--cleanup', action='store_true')
     args = parser.parse_args()
     directory = args.directory
     directory.mkdir(parents=True, exist_ok=True)
@@ -47,17 +49,20 @@ def main():
 
     class Server(FakeImmich):
         def __init__(self):
-            super().__init__(saved['assets'].values() if saved else [asset(i) for i in range(4)])
+            initial_tags = list(map(tag, ['blue_hair', '属性/蓝发', 'auto:processed', 'manual'])) if args.cleanup else []
+            super().__init__(saved['assets'].values() if saved else [asset(i, tags=initial_tags) for i in range(4)])
             self.searches = saved['searches'] if saved else 0
             self.inferences = saved['inferences'] if saved else []
             self.assignments = saved['assignments'] if saved else []
+            self.removals = saved.get('removals', []) if saved else []
             if saved:
                 self.tags = saved['tags']
 
         def save(self):
             temporary = remote_path.with_suffix('.tmp')
             temporary.write_text(json.dumps({'assets': self.assets, 'tags': self.tags, 'searches': self.searches,
-                                              'inferences': self.inferences, 'assignments': self.assignments}))
+                                              'inferences': self.inferences, 'assignments': self.assignments,
+                                              'removals': self.removals}))
             os.replace(temporary, remote_path)
 
         def handle(self, request):
@@ -75,6 +80,10 @@ def main():
                 self.save()
                 marker = 'tag-' + settings.processed_tag_name in body['tagIds']
                 block('marker' if marker else 'tags')
+            if request.method == 'DELETE':
+                self.removals.append({'path': request.url.path, 'body': json.loads(request.content)})
+                self.save()
+                block('cleanup-deleted')
             self.save()
             return response
 
@@ -99,10 +108,27 @@ def main():
         block('after_checkpoint')
         return result
     TaskStore.finish_item = finish
-    worker = ImmichAutoTagger(settings, client_factory=server.factory, engine_factory=lambda _: Engine())
+    if args.cleanup:
+        import immich_tagger.cleanup as cleanup
+        original_journal = cleanup.record_cleanup
+        def journal(*a, **kw):
+            original_journal(*a, **kw)
+            if kw['status'] == 'prepared':
+                block('cleanup-prepared')
+        cleanup.record_cleanup = journal
+        worker = EnglishTagCleaner(settings, cleanup_scope='catalog', dry_run=False,
+                                   confirm_cleanup_english=True, client_factory=server.factory,
+                                   engine_factory=lambda _: Engine())
+        # This fake server has no asynchronous metadata jobs; exercise persistence without real delays.
+        worker._wait_for_readback = lambda attempt: None
+        worker._wait_between_removals = lambda: None
+    else:
+        worker = ImmichAutoTagger(settings, client_factory=server.factory, engine_factory=lambda _: Engine())
     try:
         if args.service:
-            return asyncio.run(run_service(worker, parse_arguments(['--mode', 'continuous', '--limit', '3'])))
+            flags = (['--mode', 'cleanup-english', '--cleanup-scope', 'catalog', '--confirm-cleanup-english']
+                     if args.cleanup else ['--mode', 'continuous'])
+            return asyncio.run(run_service(worker, parse_arguments([*flags, '--limit', '3'])))
         signal.signal(signal.SIGTERM, lambda *_: worker.cancelled.set())
         worker.run(limit=3)
         return 0

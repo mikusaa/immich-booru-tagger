@@ -9,6 +9,7 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 StringList = Annotated[list[str], NoDecode]
+LEGACY_LANGUAGE_KEYS = ("ENGLISH_TAGS_ENABLED", "TRANSLATIONS_ENABLED")
 
 
 class Settings(BaseSettings):
@@ -35,8 +36,7 @@ class Settings(BaseSettings):
     model_cache_dir: Path = Path("models")
     deepdanbooru_project_dir: Path | None = None
     state_dir: Path = Path("state")
-    english_tags_enabled: bool = True
-    translations_enabled: bool = True
+    tag_language_mode: Literal["bilingual", "chinese", "english"] = "bilingual"
     translation_file: Path = Path(__file__).resolve().parent.parent / "data/tag_translations.json"
     translation_overrides: Path | None = None
 
@@ -102,11 +102,27 @@ class Settings(BaseSettings):
             raise ValueError("Account names and API keys must not be empty")
         return self
 
-    @model_validator(mode="after")
-    def validate_tag_languages(self):
-        if not self.english_tags_enabled and not self.translations_enabled:
-            raise ValueError("Enable at least one of ENGLISH_TAGS_ENABLED or TRANSLATIONS_ENABLED")
-        return self
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        # Use the configured sources, including custom env files and _env_file=None.
+        # Inspect names only: never put credentials or removed values in errors.
+        def reject_legacy():
+            keys = {str(key).upper() for source in (env_settings.env_vars, dotenv_settings.env_vars,
+                                                   init_settings.init_kwargs) for key in source}
+            legacy = sorted(keys.intersection(LEGACY_LANGUAGE_KEYS))
+            if legacy:
+                raise ValueError("已移除旧语言配置 %s，请删除并改用 TAG_LANGUAGE_MODE=bilingual/chinese/english"
+                                 % ", ".join(legacy))
+            return {}
+        return reject_legacy, init_settings, env_settings, dotenv_settings, file_secret_settings
+
+    @property
+    def english_tags_enabled(self):
+        return self.tag_language_mode in ("bilingual", "english")
+
+    @property
+    def translations_enabled(self):
+        return self.tag_language_mode in ("bilingual", "chinese")
 
     @property
     def effective_general_threshold(self):
