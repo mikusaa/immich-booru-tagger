@@ -1,12 +1,12 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.0.0**。
+当前稳定版：**1.0.1**。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
 它以独立容器运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
 
-默认同时写入英文标签和中文层级标签，可通过 `ENGLISH_TAGS_ENABLED=false` 关闭英文标签输出。例如，默认输出：
+默认同时写入英文标签和中文层级标签，可通过 `ENGLISH_TAGS_ENABLED=false` 改为优先中文、缺少译名时使用英文。例如，默认输出：
 
 ```text
 blue_hair
@@ -47,7 +47,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.0.0` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.0.1` 镜像：
 
 ```bash
 docker compose pull
@@ -96,16 +96,16 @@ docker compose logs -f
 
 在 Immich 的“账户设置 → 功能 → 标签”中启用标签后，可在标签侧边栏展开“属性、角色、评级”。
 
-只想新增中文标签时，在 `.env` 中设置：
+希望有中文就只新增中文、没有中文时使用英文，在 `.env` 中设置：
 
 ```env
 ENGLISH_TAGS_ENABLED=false
 TRANSLATIONS_ENABLED=true
 ```
 
-模型仍生成英文标签供词典查询，但只把有译名的中文标签写入 Immich；缺少译名或被覆盖文件禁用的条目会跳过。该开关只影响后续新增标签，不删除已有英文或手工标签，也不影响 `auto:processed` 完成标记。已有完成标记的图片仍会跳过。英文和中文输出不能同时关闭。
+模型仍生成英文标签供词典查询：有译名时只写中文，缺少译名或覆盖文件将译名设为空时写英文。例如 `blue_hair` 写为 `属性/蓝发`，没有译名的标签保留原文。该开关只影响后续新增标签，不删除已有英文或手工标签，也不影响 `auto:processed` 完成标记。已有完成标记的图片仍会跳过。英文和中文输出不能同时关闭。
 
-默认保留双语，是为了兼容标准 Booru 标签搜索与其他工具、保留缺少译名的识别结果，并支持更新词典后直接从已有英文标签补中文，无需重新推理。仅中文模式下，后续补全无法恢复没有保留下来的英文标签，需要重新推理。
+默认保留双语，是为了兼容标准 Booru 标签搜索与其他工具，并支持更新词典后直接从已有英文标签补中文，无需重新推理。优先中文模式也会保留缺少译名的识别结果，这些英文标签以后可以补中文；已输出中文而未保留英文的条目，后续更换译名需要重新推理或手动整理。
 
 如果图片已经有英文标签，只想补中文，可以运行：
 
@@ -142,10 +142,10 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failu
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.0.0
+ghcr.io/mikusaa/immich-booru-tagger:1.0.1
 ```
 
-正式版本使用 Git 标签 `v1.0.0`，对应镜像标签 `1.0.0`；`1.0` 和 `latest` 会随正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.0.1`，对应镜像标签 `1.0.1`；`1.0` 和 `latest` 会随正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
 ## 文档
 

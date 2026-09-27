@@ -46,7 +46,7 @@ SEARCH_API=auto
 | `MODEL_CACHE_DIR` | `/app/models` | 模型和词表缓存目录 |
 | `DEEPDANBOORU_PROJECT_DIR` | 空 | DeepDanbooru 项目目录 |
 | `STATE_DIR` | `/app/state` | SQLite 任务队列、失败记录、锁和写入日志 |
-| `ENGLISH_TAGS_ENABLED` | `true` | 是否写入模型的英文标签；关闭后仅写中文，缺少译名的条目跳过 |
+| `ENGLISH_TAGS_ENABLED` | `true` | 是否始终写入模型的英文标签；关闭后优先中文，缺少译名时使用英文 |
 | `TRANSLATIONS_ENABLED` | `true` | 是否添加中文标签 |
 | `TRANSLATION_OVERRIDES` | 空 | 自定义译名 JSON 文件 |
 | `MAX_RETRIES` / `RETRY_DELAY` | `3` / `1` | HTTP 重试次数和退避秒数 |
@@ -69,11 +69,11 @@ SEARCH_API=auto
 | `ENGLISH_TAGS_ENABLED` | `TRANSLATIONS_ENABLED` | 新增标签 |
 | --- | --- | --- |
 | `true` | `true` | 英文 + 中文（默认） |
-| `false` | `true` | 仅中文；缺少译名的条目跳过 |
+| `false` | `true` | 有译名时只写中文，缺少译名时写英文 |
 | `true` | `false` | 仅英文 |
 | `false` | `false` | 配置错误，启动时拒绝 |
 
-语言开关只控制后续新增标签，不删除已有标签。常规推理仍使用 `PROCESSED_TAG_NAME` 完成标记，并跳过已处理资产；即使所有预测都缺少译名，仅中文模式也会记录本次推理已完成。`backfill-zh` 不受英文输出开关影响，仍从资产已有的英文标签补中文。
+语言开关只控制后续新增标签，不删除已有标签。常规推理仍使用 `PROCESSED_TAG_NAME` 完成标记，并跳过已处理资产；所有预测都缺少译名时，会写入英文标签并记录本次推理已完成。`backfill-zh` 不受英文输出开关影响，仍从资产已有的英文标签补中文。
 
 ## 运行模式
 
@@ -93,7 +93,7 @@ SEARCH_API=auto
 
 ## 中文词典与自定义译名
 
-词典覆盖默认 WD14 词表中的大部分普通和角色标签。运行时不访问翻译服务，缺失项在日志中汇总；开启英文输出时保留英文，关闭时跳过该项。仅中文模式不会保存模型的原始英文标签，后续 `backfill-zh` 无法补回这些条目，需要重新推理。词典来源、固定版本和许可见 [data/NOTICE.md](../data/NOTICE.md)。
+词典覆盖默认 WD14 词表中的大部分普通和角色标签。运行时不访问翻译服务，缺失项保留英文并在日志中汇总，后续更新词典后可通过 `backfill-zh` 补中文。优先中文模式下，已有译名的条目不额外保存英文，后续更换这些条目的译名需要重新推理或手动整理。词典来源、固定版本和许可见 [data/NOTICE.md](../data/NOTICE.md)。
 
 覆盖文件示例：
 
@@ -105,7 +105,7 @@ SEARCH_API=auto
 }
 ```
 
-`kind` 只能是 `general`、`character` 或 `rating`。把 `zh` 设为空字符串可关闭该项；中文文本中的半角 `/` 会转为全角 `／`，避免意外创建额外层级。覆盖文件挂载在 `state/` 中，更新镜像不会覆盖它。改译名后，补全模式会增加新标签，旧标签需要在 Immich 中自行整理。
+`kind` 只能是 `general`、`character` 或 `rating`。把 `zh` 设为空字符串可关闭该项的中文译名，推理时仍写入英文标签；中文文本中的半角 `/` 会转为全角 `／`，避免意外创建额外层级。覆盖文件挂载在 `state/` 中，更新镜像不会覆盖它。改译名后，补全模式会为仍有对应英文标签的资产增加新标签，旧标签需要在 Immich 中自行整理。
 
 ## 失败记录、写入与健康检查
 

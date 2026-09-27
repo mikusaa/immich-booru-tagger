@@ -61,8 +61,13 @@ def test_total_limit_across_accounts(settings, kwargs, expected):
 def test_dry_run_no_writes_or_state_and_no_marker(settings, english, caplog):
     settings.english_tags_enabled = english
     caplog.set_level("INFO")
+
+    class Engine(FakeEngine):
+        def predict_tags(self, image):
+            return super().predict_tags(image) + [TagPrediction(name="unknown_tag", confidence=.8)]
+
     server = FakeImmich([asset(0)])
-    worker = processor(settings, server, dry_run=True)
+    worker = processor(settings, server, dry_run=True, engine=Engine())
     try:
         assert worker.run(limit=1).planned == 1
         assert not server.writes
@@ -73,6 +78,7 @@ def test_dry_run_no_writes_or_state_and_no_marker(settings, english, caplog):
         assert "属性/蓝发" in paths
         assert ("blue_hair" in paths) is english
         assert ("hatsune_miku" in paths) is english
+        assert "unknown_tag" in paths
         assert "auto:processed" not in paths
     finally:
         worker.close()
@@ -102,9 +108,9 @@ def test_selected_languages_missing_translations_and_existing_tags(settings, tmp
     worker = processor(settings, server, engine=Engine())
     try:
         assert worker.run().processed == 1
-        expected = existing | {"auto:processed"}
+        expected = existing | {"auto:processed", "hatsune_miku", "unknown_tag"}
         if english:
-            expected |= {"blue_hair", "hatsune_miku", "unknown_tag", "general"}
+            expected |= {"blue_hair", "general"}
         if chinese:
             expected |= {"属性/蓝发", "评级/全年龄"}
             assert set(worker.catalog.missing) == {"hatsune_miku", "unknown_tag"}
@@ -120,7 +126,7 @@ def test_selected_languages_missing_translations_and_existing_tags(settings, tmp
         worker.close()
 
 
-def test_chinese_only_without_translations_marks_processed(settings, tmp_path):
+def test_chinese_preferred_without_translations_falls_back_to_english(settings, tmp_path):
     settings.english_tags_enabled = False
     catalog = tmp_path / "catalog.json"
     catalog.write_text('{"tags": {}}')
@@ -129,7 +135,7 @@ def test_chinese_only_without_translations_marks_processed(settings, tmp_path):
     worker = processor(settings, server)
     try:
         assert worker.run().processed == 1
-        assert {t["value"] for t in server.assets["0"]["tags"]} == {"auto:processed"}
+        assert {t["value"] for t in server.assets["0"]["tags"]} == {"auto:processed", "blue_hair", "hatsune_miku"}
         assert set(worker.catalog.missing) == {"blue_hair", "hatsune_miku"}
     finally:
         worker.close()

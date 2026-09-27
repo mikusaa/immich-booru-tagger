@@ -8,7 +8,7 @@
 - 增加 `--dry-run`、`--limit`、`--batch-size`、`--library-id`、`--test-connection` 及失败记录管理命令。
 - 增加中文离线词典和 `backfill-zh` 模式，可以为已有英文标签补中文而不下载图片、不加载模型。
 - 中文标签从旧的 `zh/属性/...` 形式改为 Immich 顶层层级标签 `属性/...`、`角色/...`、`评级/...`，因此可以直接在标签侧边栏按分类查看。
-- 默认中英文标签、手工标签和 `auto:processed` 保持共存；可通过 `ENGLISH_TAGS_ENABLED=false` 只新增中文标签。补全模式不会因为已有完成标记而跳过图片。
+- 默认中英文标签、手工标签和 `auto:processed` 保持共存；可通过 `ENGLISH_TAGS_ENABLED=false` 优先新增中文标签，缺少译名时使用英文。补全模式不会因为已有完成标记而跳过图片。
 - 支持多个 API Key 或命名账号，并为不同账号隔离失败状态。
 
 ## Immich API 与可靠性

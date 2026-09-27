@@ -131,6 +131,8 @@ class ImmichAutoTagger:
                     translated = self.catalog.translate(prediction.name)
                     if translated:
                         names.append(translated)
+                    elif not self.settings.english_tags_enabled:
+                        names.append(prediction.name)
         return list(dict.fromkeys(names))
 
     def _in_scope(self, client, asset):

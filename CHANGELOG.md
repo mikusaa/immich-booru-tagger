@@ -1,5 +1,29 @@
 # 更新记录
 
+## 1.0.1 — 2026-09-27
+
+修复中文优先模式下未翻译标签丢失的问题，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.0.1`（Linux AMD64 / CPU）。
+
+- `ENGLISH_TAGS_ENABLED=false` 改为优先中文：有译名时只新增中文标签，没有译名时写入原英文标签。
+- 覆盖文件将译名设为空时同样保留英文，避免丢失识别结果；以后补齐词典后可使用 `backfill-zh` 添加中文。
+- 默认双语输出保持不变，不自动删除已有标签，已带完成标记的图片仍会跳过。
+- 同步配置示例和使用文档，自动化测试覆盖预览、部分缺少译名及全部缺少译名时的英文回退。
+
+### 升级说明
+
+停止服务后完整备份 `state/`，保留 `state/` 和 `models/` 挂载，更新 `.env` 中的 `TAGGER_IMAGE` 后拉取并重建容器：
+
+```env
+TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.0.1
+```
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+使用中文优先模式时设置 `ENGLISH_TAGS_ENABLED=false`、`TRANSLATIONS_ENABLED=true`；现有配置无需改名。升级不需要迁移状态，已有完成标记和模型缓存继续有效。1.0.0 已处理图片中被跳过且未保留英文的条目，不会因升级自动补回，需要重新推理。详细语言配置、恢复和备份方法见 [配置文档](docs/configuration.md)。
+
 ## 1.0.0 — 2026-09-27
 
 首次正式发布，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.0.0`（Linux AMD64 / CPU）。
