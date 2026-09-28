@@ -124,6 +124,64 @@ def test_recorded_evidence_is_account_specific_and_does_not_search(settings):
         worker.close()
 
 
+@pytest.mark.parametrize("search_api,legacy,reject", [
+    ("auto", False, False), ("auto", True, False),
+    ("auto", True, True), ("legacy", True, False),
+])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_catalog_cleanup_reads_only_existing_tagged_assets(settings, search_api, legacy, reject, dry_run):
+    settings.search_api = search_api
+    settings.batch_size = 2
+    blue = ["blue_hair", "属性/蓝发"]
+    rating = ["general", "评级/全年龄"]
+    server = FakeImmich([asset(i) for i in range(1000)] + [
+        asset("blue", tags=list(map(tag, blue))),
+        asset("rating", tags=list(map(tag, rating))),
+        asset("both", tags=list(map(tag, blue + rating))),
+        asset("english-only", tags=[tag("blue_hair")]),
+        asset("chinese-only", tags=[tag("属性/蓝发")]),
+        asset("untranslated", tags=[tag("unknown")]),
+        asset("no-chinese-tag", tags=[tag("short_hair")]),
+    ], legacy=legacy, reject_structured=reject)
+    server.omit_search_tags = True  # Real metadata search omits asset tags.
+    # Unfinished inference and translation must not block or run before cleanup.
+    with TaskStore(settings.state_dir) as store:
+        pending = [store.begin(kind, "unfinished", None)[0] for kind in ("inference", "backfill")]
+    worker = cleaner(settings, server, dry_run=dry_run)
+    try:
+        result = worker.run()
+        assert (result.planned if dry_run else result.processed) == 3
+        assert worker.get_metrics()["progress"]["detail_requests"] == 4
+        details = {c[1] for c in server.calls if c[0] == "GET" and c[1].startswith("/api/assets/")}
+        assert details == {"/api/assets/" + name for name in ("blue", "rating", "both", "english-only")}
+        assert paths(server, "english-only") == {"blue_hair"}
+        assert not paths(server, "0")
+        assert worker._engine is None
+        if dry_run:
+            assert not server.writes
+        else:
+            assert paths(server, "both") == {"属性/蓝发", "评级/全年龄"}
+            assert all(call[0] == "DELETE" for call in server.writes)
+        queries = [c[2] for c in server.calls if c[1] == "/api/search/metadata"]
+        assert queries
+        assert all(q.get("filter", {}).get("tagIds", {}).get("any") or q.get("tagIds") for q in queries)
+        assert all(len(q["tagIds"]) == 1 for q in queries if "tagIds" in q)
+        with TaskStore(settings.state_dir, readonly=True) as store:
+            assert all(store.get_run(run["id"]) == run for run in pending)
+    finally:
+        worker.close()
+
+
+def test_catalog_without_matching_tag_pairs_does_not_search_assets(settings):
+    server = FakeImmich([asset(0, tags=[tag("blue_hair"), tag("unknown"), tag("auto:processed")])])
+    worker = cleaner(settings, server)
+    try:
+        assert worker.run().attempted == 0
+        assert [(method, path) for method, path, _ in server.calls] == [("GET", "/api/tags")]
+    finally:
+        worker.close()
+
+
 @pytest.mark.parametrize("content", [None, "{broken", '{"account":"x","asset_id":"0","added":"blue_hair"}'])
 def test_missing_or_invalid_journal_stops_before_remote_writes(settings, content):
     if content is not None:

@@ -12,7 +12,7 @@ PHASES = {"idle": "空闲", "recovering": "恢复", "scanning": "扫描", "prepa
           "processing": "处理", "stopping": "停止", "paused": "暂停", "completed": "完成",
           "error": "异常", "waiting": "调度"}
 OPERATIONS = {"read_tags": "读取账号标签", "read_album": "读取相册成员", "search": "获取图片列表",
-              "read_asset": "读取资产状态", "read_details": "补取图片标签", "download": "下载预览图",
+              "read_asset": "读取资产状态", "read_details": "读取图片现有标签", "download": "下载预览图",
               "inference": "模型推理", "translate": "翻译标签", "create_tags": "创建标签",
               "assign_tags": "关联标签", "remove_tags": "解除英文标签关联", "read_assignments": "读取历史写入记录",
               "readback": "回读确认", "read_queues": "读取后台队列", "update_queues": "控制后台队列",
@@ -118,7 +118,7 @@ class ProgressState:
         data = self.snapshot()
         if data["phase"] == "scanning":
             message = (f"已读取 {data['scan_pages']} 页｜已读取记录 {data['scan_records']} 条"
-                       f"｜已选候选 {data['candidates']} 张｜补取详情 {data['detail_requests']} 次"
+                       f"｜已选候选 {data['candidates']} 张｜读取标签详情 {data['detail_requests']} 次"
                        f"｜本地跳过 {data['scan_skips']}")
         elif data["phase"] == "processing":
             total = data["total"]

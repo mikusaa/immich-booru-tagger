@@ -110,8 +110,22 @@ class EnglishTagCleaner(ImmichAutoTagger):
             self.progress.increment("scan_pages")
             yield page
 
+    def _catalog_pages(self, client):
+        tags = client.get_all_tags(use_cache=False)
+        paths = {tag.path for tag in tags}
+        tag_ids = []
+        for tag in tags:
+            if tag.path in (self.settings.processed_tag_name, "auto:processed"):
+                continue
+            translated = self.catalog.translate_path(tag.path)
+            if translated and translated != tag.path and translated in paths:
+                tag_ids.append(tag.id)
+        self.progress.log(f"按现有标签收集清理候选｜可匹配英文标签 {len(tag_ids)} 个"
+                          "｜仅查询关联图片并读取现有标签，不补标签或运行识别")
+        yield from client.iter_asset_pages(tag_ids=tag_ids)
+
     def _asset_pages(self, client, backfill):
-        pages = self._recorded_pages(client) if self.cleanup_scope == "recorded" else client.iter_asset_pages()
+        pages = self._recorded_pages(client) if self.cleanup_scope == "recorded" else self._catalog_pages(client)
         for page in pages:
             candidates = []
             for asset in page:

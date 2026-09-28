@@ -112,6 +112,12 @@ class FakeImmich:
                     items = [item for item in items if item["libraryId"] == library]
                 marker_ids = body.get("filter", {}).get("tagIds", {}).get("none", [])
                 items = [item for item in items if not any(t["id"] in marker_ids for t in item.get("tags") or [])]
+                any_tags = body.get("filter", {}).get("tagIds", {}).get("any", [])
+                all_tags = body.get("tagIds", [])
+                if any_tags:
+                    items = [item for item in items if any(t["id"] in any_tags for t in item.get("tags") or [])]
+                if all_tags:
+                    items = [item for item in items if set(all_tags).issubset({t["id"] for t in item.get("tags") or []})]
             size = body["size"]
             offset = int(body.get("cursor", 0)) if structured and not self.legacy else (body.get("page", 1) - 1) * size
             page = copy.deepcopy(items[offset:offset + size])

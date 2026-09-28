@@ -96,7 +96,7 @@ SEARCH_API=auto
 
 ## 一次性英文清理
 
-`--mode cleanup-english` 使用独立的队列和失败记录，定时服务只处理常规推理，不执行或恢复清理。中文缺失时先执行 `backfill-zh`；清理命令本身不补中文、不下载图片、不加载模型。清理仍需读取当前标签并逐项解除关联，大库和标签较多时也需要时间。
+`--mode cleanup-english` 使用独立的队列和失败记录，定时服务只处理常规推理，不执行或恢复清理。清理直接使用图片现有标签，不要求全库打标或中文补全完成；缺中文的英文关联保留，不阻塞其他已有中文的条目。若希望为缺中文的条目补中文，可单独执行 `backfill-zh`。清理命令本身不补中文、不下载图片、不加载模型。
 
 ```bash
 # 查看前 20 张可清理图片的计划
@@ -113,7 +113,11 @@ python -m immich_tagger.main --mode cleanup-english --cleanup-scope catalog --dr
 
 `recorded` 默认读取 `state/assignments.jsonl`，按服务地址和 API Key 摘要匹配账号，逐张读取这些图片的当前标签和范围，避免整库搜索。文件缺失或任一行损坏会中止，不会自动切换到 `catalog`。更换 API Key 或地址后摘要改变，旧账号记录不会自动匹配；应保留原身份或审阅后显式使用 `catalog`。日志表示历史新增行为，无法判断用户后来删除又手工重加的同名标签。
 
-`catalog` 遵循既有图库/相册筛选，扫描词典匹配的英文标签；无需 `assignments.jsonl`，但会包含同名手工英文标签。两种模式都使用当前词典和覆盖文件，支持原始英文及 `general/`、`character/`、`rating/` 前缀；不凭 ASCII 字符判定来源。中文路径必须与当前译名完整一致，旧 `zh/...` 路径不算对应中文。无译名、空译名、中文层级、旧 `zh/...`、`auto:processed` 及自定义完成标记均保留。
+`catalog` 先读取账号已有标签，筛出词典中可翻译且账号已有对应中文标签的英文标签，只检索这些英文标签关联的图片，再核对同一图片是否已有中文；不逐张读取整库无关图片。结构化搜索每组最多 100 个标签 ID，使用 `filter.tagIds.any` 取并集；旧版按单个 `tagIds` 查询并去重，避免多个 ID 的交集语义漏图。自动回退保留标签筛选，接口拒绝时会报错，不放宽成整库扫描。图库/相册和排除范围照常生效。没有可匹配标签时直接结束，不查询图片。
+
+该模式无需 `assignments.jsonl`，但会包含同名手工英文标签。两种模式都使用当前词典和覆盖文件，支持原始英文及 `general/`、`character/`、`rating/` 前缀；不凭 ASCII 字符判定来源。中文路径必须与当前译名完整一致，旧 `zh/...` 路径不算对应中文。无译名、空译名、中文层级、旧 `zh/...`、`auto:processed` 及自定义完成标记均保留。
+
+清理仍先收集候选快照再删除，避免解除标签后搜索分页变化导致漏图；达到 `--limit` 即结束本轮候选收集。日志中的“读取标签详情”仅表示读取现有标签，不是补标签。已完成扫描的旧清理任务可直接续跑；扫描中断后会按现有标签重新收集候选，无需删除状态或完成其他打标任务。
 
 只有 `--confirm-cleanup-english` 才允许写入；未带此参数默认预览，`--dry-run` 与确认参数不能同时使用，清理参数不能用于其他模式。预览不写 Immich、正式队列、失败记录或清理日志。`--limit` / `--max-cycles` 限制整轮可清理图片数量，恢复不会补充额度。实际执行与常规打标签共用写入锁，应先停掉正在运行的写入任务。
 
@@ -172,7 +176,7 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --progress-st
 日志时间使用 `TIMEZONE` 并带 UTC 偏移。阶段切换、重试和错误立即记录；运行时由独立报告线程定时显示状态，即使当前请求或模型调用尚未返回，也能看到操作名称和等待时间。默认 INFO 输出汇总，DEBUG 输出单张结果和标签明细；dry-run 始终在 INFO 显示计划添加的标签；清理预览显示待移除英文及对应中文。
 
 ```text
-2026-09-27 17:21:10+08:00 INFO [扫描] 已读取 12 页｜已读取记录 3000 条｜已选候选 2400 张｜补取详情 1850 次
+2026-09-27 17:21:10+08:00 INFO [扫描] 已读取 12 页｜已读取记录 3000 条｜已选候选 2400 张｜读取标签详情 1850 次
 2026-09-27 17:22:18+08:00 INFO [模型] 正在准备模型 SmilingWolf/wd-swinv2-tagger-v3｜首次运行可能需要下载权重
 2026-09-27 17:24:40+08:00 INFO [处理] 已完成 120/4260（2.8%）｜成功 118｜失败 2｜跳过 0｜本次完成 120 张
 ```
@@ -184,7 +188,7 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --progress-st
 | `run_id` / `task_status` / `resumed` | 任务 ID、任务状态、是否续跑 |
 | `phase` / `account` | 当前阶段和账号；阶段为 `idle`、`recovering`、`scanning`、`preparing_model`、`processing`、`stopping`、`paused`、`completed`、`error`、`waiting` |
 | `scan_pages` / `scan_records` | 接受的搜索分页数及其返回记录数；不等同于全库唯一图片总数 |
-| `detail_requests` / `candidates` / `scan_skips` | 补取详情次数、已选候选、本地跳过原因计数 |
+| `detail_requests` / `candidates` / `scan_skips` | 读取标签详情次数、已选候选、本地跳过原因计数 |
 | `total` / `completed` / `remaining` | 固定队列总量、已结束尝试数、剩余量；扫描结束前总量和剩余量为 `null` |
 | `session_completed` | 本次执行完成数；恢复时从零开始 |
 | `current_asset_id` / `operation` | 当前图片及操作代码，如 `search`、`read_details`、`load_model`、`download`、`inference`、`assign_tags`、`remove_tags`、`readback`、`checkpoint` |

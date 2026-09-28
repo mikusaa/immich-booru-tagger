@@ -23,6 +23,34 @@ def test_pagination_beyond_default_batch_and_manual_tags(settings, legacy, rejec
     assert all(q["orderBy"]["field"] == "fileCreatedAt" for q in queries if "orderBy" in q)
 
 
+def test_tag_search_batches_deduplicate_before_fetching_details(settings):
+    tags = [tag(f"english-{i}") for i in range(101)]
+    server = FakeImmich([asset(0, tags=tags), asset(1, tags=[tags[-1]]), asset(2)])
+    server.omit_search_tags = True
+    with server.factory(settings, settings.get_library_config()[0]) as client:
+        found = [a.id for page in client.iter_asset_pages(tag_ids=[t["id"] for t in tags]) for a in page]
+    assert found == ["0", "1"]
+    queries = [c[2] for c in server.calls if c[0] == "POST"]
+    assert [len(q["filter"]["tagIds"]["any"]) for q in queries] == [100, 1]
+    assert [c[1] for c in server.calls if c[0] == "GET"] == ["/api/assets/0", "/api/assets/1"]
+
+
+@pytest.mark.parametrize("status", [400, 403])
+def test_rejected_tag_search_never_drops_tag_filter(settings, status):
+    server = FakeImmich()
+    handle = server.handle
+    def rejected(request):
+        handle(request)
+        return httpx.Response(status)
+    server.handle = rejected
+    with server.factory(settings, settings.get_library_config()[0]) as client:
+        with pytest.raises(ImmichAPIError):
+            list(client.iter_asset_pages(tag_ids=["tag-blue_hair", "tag-general"]))
+    queries = [c[2] for c in server.calls]
+    assert len(queries) == (2 if status == 400 else 1)
+    assert all(q.get("filter", {}).get("tagIds", {}).get("any") or q.get("tagIds") for q in queries)
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_library_album_intersection_and_exclusions_even_if_server_ignores_scope(settings, legacy):
     settings.immich_include_library_ids = [LIBRARY_A, LIBRARY_B]

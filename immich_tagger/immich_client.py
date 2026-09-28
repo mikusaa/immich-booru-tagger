@@ -194,12 +194,14 @@ class ImmichClient:
             ids.update(asset["id"] for asset in data["assets"])
         return ids
 
-    def _structured_query(self, library_id, marker_id, cursor):
+    def _structured_query(self, library_id, marker_id, cursor, tag_ids=None):
         filters = {"type": {"eq": "IMAGE"}, "isOffline": {"eq": False}, "trashedAt": {"eq": None}}
         if library_id:
             filters["libraryId"] = {"eq": library_id}
         if marker_id:
             filters["tagIds"] = {"none": [marker_id]}
+        if tag_ids:
+            filters.setdefault("tagIds", {})["any"] = tag_ids
         query = {"filter": filters, "size": self.settings.batch_size,
                  "orderBy": {"field": "fileCreatedAt", "direction": "asc"}}
         if cursor:
@@ -210,32 +212,33 @@ class ImmichClient:
         for page in self.iter_asset_pages(processed_tag_id=processed_tag_id):
             yield from page
 
-    def iter_asset_pages(self, *, processed_tag_id=None):
-        self._check_cancelled()
-        album_ids = self.album_asset_ids = self._album_asset_ids()
-        libraries = self.settings.immich_include_library_ids or [None]
-        excluded = set(self.settings.immich_exclude_library_ids)
-        seen = set()
-        for library_id in libraries:
-            if library_id in excluded:
-                continue
+    def _search_pages(self, library_id, processed_tag_id, tag_ids):
+        # Structured search supports OR across IDs. Legacy tagIds means AND, so
+        # query one tag at a time there; never fall back to an unfiltered library.
+        remaining = list(tag_ids) if tag_ids is not None else [None]
+        while remaining:
             page, cursor = 1, None
             tokens = set()
             while True:
                 self._check_cancelled()
                 structured = self._search_api != "legacy"
-                query = self._structured_query(library_id, processed_tag_id, cursor) if structured else {
+                group = remaining[:100 if structured else 1]
+                selected_tags = group if tag_ids is not None else None
+                query = self._structured_query(library_id, processed_tag_id, cursor, selected_tags) if structured else {
                     "type": "IMAGE", "size": self.settings.batch_size, "page": page,
                     "order": "asc", "isOffline": False, "withDeleted": False,
                 }
-                if not structured and library_id:
-                    query["libraryId"] = library_id
+                if not structured:
+                    if library_id:
+                        query["libraryId"] = library_id
+                    if selected_tags:
+                        query["tagIds"] = selected_tags
                 try:
                     with self._operation("search"):
                         response = self._make_request("POST", "/api/search/metadata", json_data=query).json()
                 except ImmichAPIError as error:
                     if self._search_api == "auto" and error.status_code == 400:
-                        self.logger.warning("[扫描] 结构化搜索被拒绝，改用旧版分页并保持范围与完成标记校验")
+                        self.logger.warning("[扫描] 结构化搜索被拒绝，改用旧版分页并保持范围与标签筛选")
                         self._search_api = "legacy"
                         continue
                     raise
@@ -243,16 +246,47 @@ class ImmichClient:
                 if not isinstance(section, dict) or not isinstance(section.get("items"), list):
                     raise ImmichAPIError("图片搜索返回格式无效")
                 if structured and self._search_api == "auto" and "nextCursor" not in section:
-                    self.logger.warning("[扫描] 服务返回旧版分页格式，改用旧版搜索")
+                    self.logger.warning("[扫描] 服务返回旧版分页格式，改用旧版搜索并保持标签筛选")
                     self._search_api = "legacy"
                     continue
                 if structured:
                     self._search_api = "structured"
+                token_key = "nextCursor" if structured else "nextPage"
+                if token_key not in section:
+                    raise ImmichAPIError(f"图片搜索响应缺少 {token_key}")
+                token = section[token_key]
+                if token is not None and (str(token) in tokens or not section["items"]):
+                    raise ImmichAPIError("图片搜索分页未推进 (pagination did not advance)")
+                yield section["items"]
+                if token is None:
+                    del remaining[:len(group)]
+                    break
+                tokens.add(str(token))
+                if structured:
+                    cursor = token
+                else:
+                    page = int(token)
+
+    def iter_asset_pages(self, *, processed_tag_id=None, tag_ids=None):
+        self._check_cancelled()
+        if tag_ids is not None:
+            tag_ids = list(dict.fromkeys(tag_ids))
+            if not tag_ids:
+                return
+        matching_tags = set(tag_ids or [])
+        album_ids = self.album_asset_ids = self._album_asset_ids()
+        libraries = self.settings.immich_include_library_ids or [None]
+        excluded = set(self.settings.immich_exclude_library_ids)
+        seen = set()
+        for library_id in libraries:
+            if library_id in excluded:
+                continue
+            for items in self._search_pages(library_id, processed_tag_id, tag_ids):
                 if self.progress:
                     self.progress.increment("scan_pages")
-                    self.progress.increment("scan_records", len(section["items"]))
+                    self.progress.increment("scan_records", len(items))
                 candidates = []
-                for item in section["items"]:
+                for item in items:
                     self._check_cancelled()
                     asset = Asset.model_validate(item)
                     if asset.id in seen:
@@ -288,22 +322,12 @@ class ImmichClient:
                     if processed_tag_id and any(t.id == processed_tag_id for t in asset.tags):
                         self._skip("已有完成标记")
                         continue
+                    if matching_tags and not any(t.id in matching_tags for t in asset.tags):
+                        self._skip("无匹配的英文标签")
+                        continue
                     seen.add(asset.id)
                     candidates.append(asset)
-                token_key = "nextCursor" if structured else "nextPage"
-                if token_key not in section:
-                    raise ImmichAPIError(f"图片搜索响应缺少 {token_key}")
-                token = section[token_key]
-                if token is not None and (str(token) in tokens or not section["items"]):
-                    raise ImmichAPIError("图片搜索分页未推进 (pagination did not advance)")
                 yield candidates
-                if token is None:
-                    break
-                tokens.add(str(token))
-                if structured:
-                    cursor = token
-                else:
-                    page = int(token)
 
     def test_connection(self):
         self.get_all_tags(use_cache=False)

@@ -1,6 +1,6 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.1.1**。修复英文清理的后台回写竞态与长时间等待，新增可选队列维护模式；从 `1.0.x` 升级仍须迁移语言配置，见下方说明。
+当前稳定版：**1.1.2**。修复英文清理扫描整库的问题，按已有标签检索关联图片，不要求完成全库打标或中文补全；从 `1.0.x` 升级仍须迁移语言配置，见下方说明。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
@@ -47,7 +47,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.1.1` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.1.2` 镜像：
 
 ```bash
 docker compose pull
@@ -119,7 +119,7 @@ docker compose run --rm immich-tagger \
 
 ## 一次性清理旧英文
 
-先把日常输出设为 `TAG_LANGUAGE_MODE=chinese`。如果对应中文已经存在，可直接清理；否则先单独运行上面的 `backfill-zh`。两项操作都不加载模型，耗时主要取决于读取资产和 API 写入次数，不能保证清理一定更快。
+先把日常输出设为 `TAG_LANGUAGE_MODE=chinese`。清理直接使用图片现有标签，不要求全库打标或中文补全完成：同一图片已有对应中文就清理英文，缺少中文则保留英文并继续处理其他图片。只有希望为缺中文的条目补中文时，才需要单独运行上面的 `backfill-zh`。两项操作都不加载模型。
 
 ```bash
 # 预览（不加确认参数时也默认预览）
@@ -137,7 +137,9 @@ docker compose up -d
 ```
 
 - `recorded`（默认）：从 `state/assignments.jsonl` 读取本账号曾由程序新增的标签，直接检查记录中的图片，不搜索整库。记录缺失或损坏会报错；记录不完整的条目不会清理。
-- `catalog`：显式传入 `--cleanup-scope catalog`，扫描配置范围内的图片，清理词典中已有中文对应项的英文标签。可覆盖没有历史记录的标签，也会处理同名手工英文标签。
+- `catalog`：显式传入 `--cleanup-scope catalog`，先读取账号已有标签，只检索可翻译英文标签关联的图片，再核对图片当前是否有对应中文，不逐张读取整库无关图片。可覆盖没有历史记录的标签，也会处理同名手工英文标签。
+
+清理先收集关联图片的候选快照，再执行解除操作，避免分页过程中删除标签造成漏图。日志中的“读取标签详情”是只读查询现有标签，不是补标签；可用 `--limit 20` 先清理少量候选。新版搜索按多个英文标签取并集，旧版搜索逐标签查询并去重，均保留图库/相册范围，不退回无标签筛选的整库扫描。
 
 两种方式都遵守图库/相册和排除范围；没有 include 时处理账号可见图片。只有图片当前已存在对应的 `属性/...`、`角色/...` 或 `评级/...` 标签才会解除英文关联。无译名、空译名、自定义完成标记、`auto:processed`、旧版 `zh/...` 都保留。不会删除图片或全局标签对象，因此标签侧边栏仍可能留下空的英文标签。
 
@@ -154,7 +156,7 @@ docker compose up -d
 在 `.env` 中更新镜像版本：
 
 ```env
-TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.1.1
+TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.1.2
 ```
 
 然后拉取镜像并重建容器：
@@ -190,10 +192,10 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failu
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.1.1
+ghcr.io/mikusaa/immich-booru-tagger:1.1.2
 ```
 
-正式版本使用 Git 标签 `v1.1.1`，对应镜像标签 `1.1.1`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.1.2`，对应镜像标签 `1.1.2`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
 ## 文档
 
