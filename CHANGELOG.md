@@ -1,5 +1,21 @@
 # 更新记录
 
+## 1.1.1 — 2026-09-28
+
+修复英文清理的异步回写竞态与逐标签固定等待，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.1.1`（Linux AMD64 / CPU）。
+
+- 英文标签清理增加显式的 `--cleanup-maintenance`：逐张暂停元数据任务、快速清理、先完成 XMP 写入再提取元数据，最终核验后才提交成功，避免 Immich 异步任务恢复旧英文标签；已验证 Immich 3.2.2。
+- 单独的 `CLEANUP_ADMIN_API_KEY` 只用于队列控制；持久化保存队列暂停状态，强制退出可续跑恢复，也可用 `--restore-cleanup-queues` 独立恢复。维护流程受原有单写入锁保护。
+- 清理日志显示标签序号、重试轮次、本张累计耗时及队列积压，区分等待异步回写与回读请求。未启用维护模式时保留兼容行为。
+
+### 升级说明
+
+从 1.1.0 升级无需迁移配置或 SQLite 状态。停止写入任务并备份 `state/`，将 `.env` 的 `TAGGER_IMAGE` 改为 `ghcr.io/mikusaa/immich-booru-tagger:1.1.1`，执行 `docker compose pull`。使用维护模式前在 `.env` 配置管理员账号的 `CLEANUP_ADMIN_API_KEY`（`queue.read`、`queue.update`），并在原有确认清理命令后追加 `--cleanup-maintenance`。图片仍使用原账号 Key，清理范围保持原设置。
+
+维护模式会临时控制实例全局的 `sidecar`、`metadataExtraction` 队列，包括暂时运行原本暂停的积压任务；请先停止其他标签写入、元数据导入和队列控制任务。强制退出后重新执行同一维护命令恢复并续跑，或单独执行 `python -m immich_tagger.main --restore-cleanup-queues`。清理及队列恢复完成后再运行 `docker compose up -d`。未启用维护模式时保留兼容路径及原有等待行为；从 1.0.x 升级仍须按下方说明迁移语言配置。
+
+本地通过 185 项自动化测试，包含 8 个维护阶段的真实 SIGKILL 续跑场景。隔离的真实 Immich 3.2.2 中，15 个英文标签清理耗时 2.653–2.689 秒（旧代码同图约 86.436 秒）；三轮均保留全部 17 个其他标签，队列恢复原始暂停状态，主动刷新元数据后无英文回流。该数据来自单张合成图片，不代表线上整库吞吐。
+
 ## 1.1.0 — 2026-09-28
 
 新增三种语言输出和一次性英文关联清理，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.1.0`（Linux AMD64 / CPU）。本次升级需要迁移旧语言配置。

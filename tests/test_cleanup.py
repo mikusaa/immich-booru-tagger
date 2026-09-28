@@ -27,6 +27,11 @@ def cleaner(settings, server, *, scope="catalog", dry_run=False, **kwargs):
     return worker
 
 
+def maintenance_cleaner(settings, server, *, scope="catalog"):
+    settings.cleanup_admin_api_key = "admin-key"
+    return cleaner(settings, server, scope=scope, maintenance=True)
+
+
 def record(settings, asset_id="0", paths=("blue_hair",), account=None):
     account = account or settings.get_library_config()[0]
     record_assignment(settings.state_dir, account_scope(settings, account), asset_id, list(paths))
@@ -322,6 +327,28 @@ def test_client_removal_guard_and_readback(settings):
     with server.factory(settings, settings.get_library_config()[0]) as client:
         with pytest.raises(ImmichAPIError, match="removal incomplete"):
             client.untag_single_asset("0", "tag-blue_hair")
+
+
+def test_maintenance_cleanup_coordinates_queues_and_restores_state(settings):
+    server = FakeImmich([bilingual_asset(0)])
+    worker = maintenance_cleaner(settings, server)
+    try:
+        result = worker.run()
+        assert result.processed == 1
+        assert paths(server) == {"属性/蓝发", "auto:processed", "manual"}
+        assert all(not queue["isPaused"] for queue in server.queues.values())
+        assert not (settings.state_dir / "cleanup-queues.json").exists()
+        assert any(call[1].startswith("/api/queues/") for call in server.writes)
+    finally:
+        worker.close()
+
+
+def test_maintenance_rejects_missing_admin_key(settings):
+    server = FakeImmich([bilingual_asset(0)])
+    with pytest.raises(ValueError, match="CLEANUP_ADMIN_API_KEY"):
+        EnglishTagCleaner(settings, cleanup_scope="catalog", dry_run=False,
+                          confirm_cleanup_english=True, maintenance=True,
+                          client_factory=server.factory)
 
 
 @pytest.mark.parametrize("status", [401, 403])

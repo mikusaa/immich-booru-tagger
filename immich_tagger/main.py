@@ -30,6 +30,8 @@ def parse_arguments(argv=None):
     parser.add_argument("--cleanup-scope", choices=["recorded", "catalog"],
                         help="Cleanup evidence: recorded (default) or all matching catalog tags")
     parser.add_argument("--confirm-cleanup-english", action="store_true", help="Apply English cleanup (default: preview)")
+    parser.add_argument("--cleanup-maintenance", action="store_true",
+                        help="Coordinate Immich sidecar/metadata queues during confirmed cleanup")
     commands = parser.add_mutually_exclusive_group()
     commands.add_argument("--test-connection", action="store_true")
     commands.add_argument("--show-failures", action="store_true")
@@ -37,11 +39,18 @@ def parse_arguments(argv=None):
     commands.add_argument("--reset-failure", metavar="ASSET_ID")
     commands.add_argument("--progress-status", action="store_true")
     commands.add_argument("--reset-progress", action="store_true", help="已弃用：此参数不重置持久化进度或删除队列")
+    commands.add_argument("--restore-cleanup-queues", action="store_true",
+                          help="Restore interrupted cleanup queues without deleting tags")
     args = parser.parse_args(argv)
-    if args.mode != "cleanup-english" and (args.cleanup_scope or args.confirm_cleanup_english):
+    if args.mode != "cleanup-english" and (args.cleanup_scope or args.confirm_cleanup_english or args.cleanup_maintenance):
         parser.error("清理参数只能用于 --mode cleanup-english")
     if args.confirm_cleanup_english and args.dry_run:
         parser.error("--dry-run 不能与 --confirm-cleanup-english 同时使用")
+    if args.cleanup_maintenance and not args.confirm_cleanup_english:
+        parser.error("--cleanup-maintenance 需要 --confirm-cleanup-english")
+    if args.restore_cleanup_queues and (args.dry_run or args.cleanup_maintenance or args.confirm_cleanup_english
+                                       or args.mode != "continuous" or args.cleanup_scope):
+        parser.error("--restore-cleanup-queues 单独使用，不与清理或预览参数组合")
     if args.mode == "cleanup-english":
         args.cleanup_scope = args.cleanup_scope or "recorded"
         args.dry_run = not args.confirm_cleanup_english
@@ -110,7 +119,13 @@ def main(argv=None):
             overrides["immich_include_library_ids"] = args.library_id
         settings = Settings(**overrides)
         secrets = [account["api_key"] for account in settings.get_library_config()]
+        if settings.cleanup_admin_api_key:
+            secrets.append(settings.cleanup_admin_api_key)
         setup_logging(settings.log_level, settings.timezone, secrets)
+        if args.restore_cleanup_queues:
+            from .cleanup_queues import restore_cleanup_queues
+            restore_cleanup_queues(settings)
+            return 0
         if args.dry_run and (args.reset_failures or args.reset_failure or args.reset_progress):
             raise ValueError("Dry run cannot be combined with state reset commands")
         if args.dry_run and args.mode in ("scheduler", "health-only"):
@@ -126,7 +141,8 @@ def main(argv=None):
         if args.mode == "cleanup-english":
             from .cleanup import EnglishTagCleaner
             processor = EnglishTagCleaner(settings, dry_run=args.dry_run, cleanup_scope=args.cleanup_scope,
-                                         confirm_cleanup_english=args.confirm_cleanup_english)
+                                         confirm_cleanup_english=args.confirm_cleanup_english,
+                                         maintenance=args.cleanup_maintenance)
         else:
             processor = ImmichAutoTagger(settings, dry_run=args.dry_run)
         if args.test_connection:

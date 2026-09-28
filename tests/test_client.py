@@ -108,6 +108,17 @@ def test_write_guard_and_readback(settings):
             client.tag_single_asset("0", [new.id])
 
 
+def test_cleanup_queue_status_and_pause_validation(settings):
+    server = FakeImmich()
+    with server.factory(settings, {"name": "admin", "api_key": "admin-key"}) as client:
+        assert client.get_cleanup_queue("sidecar")["isPaused"] is False
+        assert client.set_cleanup_queue_paused("sidecar", True)["isPaused"] is True
+        with pytest.raises(ValueError):
+            client.get_cleanup_queue("library")
+        with pytest.raises(ValueError):
+            client.set_cleanup_queue_paused("sidecar", 1)
+
+
 def test_transport_retry(settings, monkeypatch):
     settings.max_retries = 2
     attempts = []

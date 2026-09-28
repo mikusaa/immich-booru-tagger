@@ -101,8 +101,12 @@ SEARCH_API=auto
 ```bash
 # 查看前 20 张可清理图片的计划
 python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --dry-run --limit 20
-# 实际清理；同一条命令可在中断后重新运行续跑
+# 兼容路径；同一条命令可在中断后重新运行续跑
 python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english
+# 维护模式；需要管理员账号的 CLEANUP_ADMIN_API_KEY（queue.read、queue.update）
+python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english --cleanup-maintenance
+# 强制退出后只恢复后台队列，不继续清理
+python -m immich_tagger.main --restore-cleanup-queues
 # 历史记录不完整时，显式扩大到词典匹配项；先预览
 python -m immich_tagger.main --mode cleanup-english --cleanup-scope catalog --dry-run
 ```
@@ -113,9 +117,17 @@ python -m immich_tagger.main --mode cleanup-english --cleanup-scope catalog --dr
 
 只有 `--confirm-cleanup-english` 才允许写入；未带此参数默认预览，`--dry-run` 与确认参数不能同时使用，清理参数不能用于其他模式。预览不写 Immich、正式队列、失败记录或清理日志。`--limit` / `--max-cycles` 限制整轮可清理图片数量，恢复不会补充额度。实际执行与常规打标签共用写入锁，应先停掉正在运行的写入任务。
 
+维护模式需要在 `.env` 设置 `CLEANUP_ADMIN_API_KEY`，使用管理员账号创建并授予 `queue.read`、`queue.update` 权限。已在 Immich 3.2.2 验证，要求支持 `GET/PUT /api/queues/{name}`；不兼容或权限不足时不会退回无协调的快速删除。该密钥只用于队列控制，资产范围、图片读写及历史记录仍使用原账号 Key。不要用管理员 Key 替换原账号配置。
+
+维护模式以单张图片为一批，在同一写入锁下执行：暂停 `metadataExtraction` 和 `sidecar`，等待活动任务归零，重新核对资产后快速清理；先恢复并排空 `sidecar`，再恢复并排空 `metadataExtraction`，还原两者原来的暂停状态，最终回读检查已删除英文未回流、中文和其他保留标签仍完整，才提交本张成功。每个等待阶段需连续两次观察到队列空闲。维护期间暂停的是实例全局队列，原本暂停的队列也会暂时运行完成积压任务；请先停止其他标签写入、元数据导入和队列控制任务。
+
+修改队列前会同步保存 `state/cleanup-queues.json`，只含服务地址摘要、原始暂停状态、失败计数和恢复阶段，不含密钥。正常停止会先恢复队列；强制退出后，重新执行维护命令会先将两队列暂停并按上述顺序恢复。也可使用独立的 `--restore-cleanup-queues`，仅恢复队列，不读取词典或资产、不继续清理。不要删除恢复文件或改用另一状态目录绕过恢复；普通写入模式发现该文件会停止。
+
+`CLEANUP_QUEUE_TIMEOUT` 默认为 300 秒，限制每个等待阶段，不含单次 HTTP 请求及重试耗时。积压较大时恢复可能超过 Docker 默认的 90 秒停止宽限期；可用 `docker compose stop -t 600 immich-tagger` 留出恢复时间。队列恢复失败会保留恢复文件并停止整轮；恢复成功才移除文件。后台新增失败任务或保留标签缺失会中止整轮；英文回流记为本张失败，不计成功。这些最终校验失败不代表队列仍待恢复，应以恢复文件及错误信息为准。
+
 删除前重新检查资产范围和中文标签，使用 `DELETE /api/tags/{tagId}/assets`、请求体 `{"ids":["asset-id"]}`，只解除一个标签在该图片上的关联；检查响应中该资产的 `success` 并逐项回读确认。API Key 需要 `tag.asset` 和读取资产的权限，不需要 `tag.delete` 或资产删除权限。不会删除全局标签，所以可能留下空标签。
 
-Immich 会异步写入 XMP / 重建标签关联，立即回读成功的标签也可能随后重新出现。逐项解除间隔为 `RETRY_DELAY` 秒，至少 5 秒、最多 60 秒；每轮删除后对整张图片连续做两次延迟回读，每次等待至少 5 秒，并随本图片重试轮次指数退避、最多 60 秒。发现原计划内的英文重新出现时，重新核对中文和范围，最多重试 `MAX_RETRIES` 次；不会扩大到原计划之外的标签。复核无法保证后续外部元数据任务不再添加标签。
+Immich 会异步写入 XMP / 重建标签关联，立即回读成功的标签也可能随后重新出现。未启用维护模式时保留兼容路径：逐项解除间隔为 `RETRY_DELAY` 秒，至少 5 秒、最多 60 秒；每轮删除后对整张图片连续做两次延迟回读，每次等待至少 5 秒，并随本图片重试轮次指数退避、最多 60 秒。发现原计划内的英文重新出现时，重新核对中文和范围，最多重试 `MAX_RETRIES` 次；不会扩大到原计划之外的标签。15 个英文标签至少固定等待 85 秒，且延时不能消除后台竞态。日志区分异步等待与回读请求，并显示当前标签序号、轮次及本张累计耗时。维护模式不执行这些固定延时。任何模式的复核都无法保证后续外部元数据任务不再添加标签。
 
 HTTP 临时故障也按 `MAX_RETRIES` 重试；复核重试耗尽或其他单张处理失败计入独立失败记录，下次显式执行重试，达到 `FAILURE_TIMEOUT` 后暂停该图片。`--show-failures` / 重置命令包含 `cleanup-recorded` 和 `cleanup-catalog` 两类。鉴权或日志写入失败中止整轮。恢复时刷新相册范围、重读资产标签，已移除项不会再请求删除；清理范围、词典或历史写入记录变化会建立新队列。
 

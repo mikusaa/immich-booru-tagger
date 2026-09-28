@@ -37,6 +37,8 @@ class ImmichAutoTagger:
             client.progress = self.progress
             client.cancelled = self.cancelled
         self.secrets = [client.account["api_key"] for client in self.clients]
+        if self.settings.cleanup_admin_api_key:
+            self.secrets.append(self.settings.cleanup_admin_api_key)
         self.engine_factory = engine_factory
         self._engine = None
         self._catalog = None
@@ -337,6 +339,10 @@ class ImmichAutoTagger:
                 pass
             raise
 
+    def _before_run(self):
+        if not self.dry_run and (self.settings.state_dir / "cleanup-queues.json").exists():
+            raise ProcessorError("存在未恢复的清理维护队列；请先执行 --restore-cleanup-queues，或用 --cleanup-maintenance 续跑以恢复队列")
+
     def run(self, *, backfill=False, limit=None, single=False, max_cycles=None):
         if self.cancelled.is_set():
             return self.last_result.model_copy()
@@ -354,6 +360,7 @@ class ImmichAutoTagger:
                                       f"｜包含相册 {len(self.settings.immich_include_album_ids)} 个"
                                       f"｜排除图库 {len(self.settings.immich_exclude_library_ids)} 个")
                 with writer_lock(self.settings.state_dir, self.dry_run):
+                    self._before_run()
                     signature, maximum, revision = self._signature(backfill=backfill, limit=limit, single=single, max_cycles=max_cycles)
                     self._saved_revision = revision
                     if self._catalog:

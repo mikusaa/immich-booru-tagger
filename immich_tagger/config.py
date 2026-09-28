@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     tag_language_mode: Literal["bilingual", "chinese", "english"] = "bilingual"
     translation_file: Path = Path(__file__).resolve().parent.parent / "data/tag_translations.json"
     translation_overrides: Path | None = None
+    cleanup_admin_api_key: str = Field(default="", repr=False)
+    cleanup_queue_timeout: float = Field(default=300, gt=0)
 
     max_retries: int = Field(default=3, ge=0)
     retry_delay: float = Field(default=1, gt=0)

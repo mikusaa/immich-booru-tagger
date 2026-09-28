@@ -4,7 +4,8 @@ import sqlite3
 import time
 import uuid
 
-from .immich_client import ImmichAPIError, ProcessingCancelled, TagRemovalIncompleteError
+from .cleanup_queues import CleanupQueues, QueueMaintenanceError
+from .immich_client import ImmichAPIError, ImmichClient, ProcessingCancelled, TagRemovalIncompleteError
 from .logging import safe_error
 from .models import AssetProcessingResult
 from .processor import ImmichAutoTagger, ProcessorError, StateWriteError
@@ -14,14 +15,27 @@ from .task_store import fingerprint
 
 class EnglishTagCleaner(ImmichAutoTagger):
     def __init__(self, settings=None, *, cleanup_scope="recorded", dry_run=True,
-                 confirm_cleanup_english=False, **kwargs):
+                 confirm_cleanup_english=False, maintenance=False, **kwargs):
         if cleanup_scope not in ("recorded", "catalog"):
             raise ValueError("cleanup_scope must be recorded or catalog")
         if not dry_run and not confirm_cleanup_english:
             raise ValueError("实际清理需要 --confirm-cleanup-english")
         self.cleanup_scope = cleanup_scope
+        self.maintenance = bool(maintenance and not dry_run)
         self._recorded = {}
+        self._maintenance_client = None
+        self._queues = None
+        client_factory = kwargs.get("client_factory", ImmichClient)
         super().__init__(settings, dry_run=dry_run, **kwargs)
+        if self.maintenance:
+            key = self.settings.cleanup_admin_api_key.strip()
+            if not key:
+                super().close()
+                raise ValueError("清理维护模式需要 CLEANUP_ADMIN_API_KEY")
+            self._maintenance_client = client_factory(
+                self.settings, {"name": "cleanup-admin", "api_key": key}, dry_run=False)
+            self._maintenance_client.progress = self.progress
+            self._queues = CleanupQueues(self._maintenance_client, self.settings, self.progress, self.cancelled)
 
     def _task_kind(self, backfill):
         return "cleanup-english"
@@ -31,6 +45,13 @@ class EnglishTagCleaner(ImmichAutoTagger):
 
     def _failure_scope(self, scope, backfill):
         return f"{scope}-cleanup-{self.cleanup_scope}"
+
+    def _before_run(self):
+        if self._queues:
+            self._queues.recover()
+            self._queues.preflight()
+        else:
+            super()._before_run()
 
     def _signature(self, **kwargs):
         kwargs["backfill"] = True
@@ -109,11 +130,15 @@ class EnglishTagCleaner(ImmichAutoTagger):
 
     def _wait_between_removals(self):
         # Each unlink schedules an XMP write in Immich; avoid a rapid burst for one asset.
+        if self.maintenance:
+            return
         time.sleep(min(max(5, self.settings.retry_delay), 60))
 
     def _wait_for_readback(self, attempt):
         # Immich may rebuild associations asynchronously while writing XMP metadata.
         # Check the complete asset after allowing those jobs to settle, not just each DELETE.
+        if self.maintenance:
+            return
         time.sleep(min(max(5, self.settings.retry_delay * 2 ** attempt), 60))
 
     def _remove_pairs(self, client, asset_id, pairs):
@@ -121,7 +146,11 @@ class EnglishTagCleaner(ImmichAutoTagger):
             return []
         planned = {tag.id: (tag, translated) for tag, translated in pairs}
         for attempt in range(self.settings.max_retries + 1):
-            for tag, translated in planned.values():
+            for index, (tag, translated) in enumerate(planned.values(), 1):
+                if self.maintenance and self.cancelled.is_set():
+                    raise ProcessingCancelled()
+                self.progress.update(cleanup_tag=tag.path, cleanup_index=index, cleanup_total=len(planned),
+                                     cleanup_attempt=attempt + 1)
                 current = client.get_asset(asset_id)
                 if not self._in_scope(client, current):
                     break
@@ -136,14 +165,14 @@ class EnglishTagCleaner(ImmichAutoTagger):
                     pass
                 else:
                     self._journal(client, asset_id, status="confirmed", **values)
-                with self.progress.operation("readback"):
+                with self.progress.operation("settle_tags"):
                     self._wait_between_removals()
             # Require two spaced clean reads: an immediate or single delayed read can
             # precede a queued metadata job that restores an older tag list.
             for _ in range(2):
-                with self.progress.operation("readback"):
+                with self.progress.operation("settle_tags"):
                     self._wait_for_readback(attempt)
-                    current = client.get_asset(asset_id, operation="readback")
+                current = client.get_asset(asset_id, operation="readback")
                 if current.tags is None:
                     raise ProcessorError("资产响应缺少标签")
                 present = {tag.id for tag in current.tags}
@@ -160,6 +189,7 @@ class EnglishTagCleaner(ImmichAutoTagger):
 
     def process_asset(self, client, asset, *, backfill=False):
         started = time.monotonic()
+        self.progress.update(cleanup_started=started)
         result = AssetProcessingResult(asset_id=asset.id)
         try:
             try:
@@ -179,10 +209,11 @@ class EnglishTagCleaner(ImmichAutoTagger):
                 for tag, translated in pairs:
                     self.progress.log(f"仅预览｜图片 ID：{asset.id}｜计划移除：{tag.path}｜已有中文：{translated}")
                 return result
-            result.tags_removed = self._remove_pairs(client, asset.id, pairs)
+            result.tags_removed = (self._remove_with_queues(client, asset.id, pairs) if self.maintenance
+                                   else self._remove_pairs(client, asset.id, pairs))
             result.success = True
             result.status = "processed" if result.tags_removed else "skipped"
-        except (StateWriteError, sqlite3.Error):
+        except (StateWriteError, sqlite3.Error, QueueMaintenanceError, ProcessingCancelled):
             raise
         except Exception as error:
             if isinstance(error, ImmichAPIError) and error.status_code in (401, 403):
@@ -191,8 +222,38 @@ class EnglishTagCleaner(ImmichAutoTagger):
             self.progress.log(f"英文清理失败｜图片 ID：{asset.id}｜原因：{result.error}", logging.ERROR)
         finally:
             result.processing_time = time.monotonic() - started
+            self.progress.update(cleanup_started=None, cleanup_tag=None, cleanup_total=None,
+                                 cleanup_index=None, cleanup_attempt=None)
         return result
 
+    def _remove_with_queues(self, client, asset_id, pairs):
+        if not pairs:
+            return []
+        with self._queues.paused():
+            # Jobs active at the start may have changed the asset. Capture a fresh
+            # plan and protected tags only after they have completely stopped.
+            current = client.get_asset(asset_id)
+            if not self._in_scope(client, current):
+                return []
+            pairs = self._pairs(client, current)
+            planned = {tag.id: tag.path for tag, _ in pairs}
+            protected = {tag.id for tag in current.tags} - planned.keys()
+            removed = self._remove_pairs(client, asset_id, pairs)
+        # The shared pipeline commits this asset only after this final read.
+        current = client.get_asset(asset_id, operation="readback")
+        if current.tags is None:
+            raise ProcessorError("资产响应缺少标签")
+        present = {tag.id for tag in current.tags}
+        if not protected.issubset(present):
+            raise QueueMaintenanceError(f"后台复核发现保留标签缺失：{asset_id}，停止本轮清理")
+        if any(tid in present for tid, path in planned.items() if path in removed):
+            raise TagRemovalIncompleteError(f"后台复核发现英文标签重新出现：{asset_id}")
+        return removed
+
     def run(self, *, limit=None, max_cycles=None):
-        # Maintenance uses the model-free pipeline. Its queue and failures remain separate.
         return super().run(backfill=True, limit=limit, max_cycles=max_cycles)
+
+    def close(self):
+        if self._maintenance_client:
+            self._maintenance_client.close()
+        super().close()

@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Pull Request | 运行测试、构建镜像和离线冒烟测试 | 不发布 |
 | 推送 `main` | 测试通过后发布 | `main`、完整 SHA |
-| 推送 `v1.1.0` | 测试通过后发布正式版本 | `1.1.0`、`1.1`、`latest`、SHA |
+| 推送 `v1.1.1` | 测试通过后发布正式版本 | `1.1.1`、`1.1`、`latest`、SHA |
 | 推送预发布标签 | 发布预发布版本 | 版本标签、SHA，不更新 `latest` |
 | 手动运行 | 对选定分支执行相同流程 | 由元数据规则决定 |
 
@@ -29,8 +29,8 @@ docker build --platform linux/amd64 -t immich-booru-tagger:local .
 
 新增工作流文件不会自动产生镜像，必须等一次对应的 Actions 运行成功后，GHCR 中才会有可拉取的标签。
 
-## 1.1.0
+## 1.1.1
 
-正式版本使用 Git 标签 `v1.1.0`，GHCR 镜像为 `ghcr.io/mikusaa/immich-booru-tagger:1.1.0`。Compose 和 `.env.example` 默认固定该版本。发布内容与升级说明见 [更新记录](../CHANGELOG.md)。
+正式版本使用 Git 标签 `v1.1.1`，GHCR 镜像为 `ghcr.io/mikusaa/immich-booru-tagger:1.1.1`。Compose 和 `.env.example` 默认固定该版本。发布内容与升级说明见 [更新记录](../CHANGELOG.md)。
 
 发布前确认 `immich_tagger.__version__`、Compose 默认镜像和环境变量示例版本一致。推送版本标签后，等待测试、离线重启验收、运行镜像冒烟检查和 GHCR 推送全部成功，再创建 GitHub Release。不要覆盖已发布的版本标签；修复使用下一个补丁版本。

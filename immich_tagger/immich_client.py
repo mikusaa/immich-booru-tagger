@@ -149,6 +149,34 @@ class ImmichClient:
             if actual.tags is None or any(tag.id == tag_id for tag in actual.tags):
                 raise TagRemovalIncompleteError(f"标签解除回读不完整：{asset_id} (Tag removal incomplete)")
 
+    @staticmethod
+    def _validate_queue(name, data):
+        if name not in ("sidecar", "metadataExtraction"):
+            raise ValueError("Unsupported maintenance queue")
+        counts = data.get("statistics") if isinstance(data, dict) else None
+        if (not isinstance(data, dict) or data.get("name") != name
+                or type(data.get("isPaused")) is not bool or not isinstance(counts, dict)
+                or any(type(counts.get(k)) is not int or counts[k] < 0
+                       for k in ("active", "waiting", "delayed", "paused", "failed"))):
+            raise ImmichAPIError(f"队列状态无效：{name}；需要兼容的 Immich 队列 API")
+        return data
+
+    @observed("read_queues")
+    def get_cleanup_queue(self, name):
+        if name not in ("sidecar", "metadataExtraction"):
+            raise ValueError("Unsupported maintenance queue")
+        return self._validate_queue(name, self._make_request("GET", f"/api/queues/{name}").json())
+
+    @observed("update_queues")
+    def set_cleanup_queue_paused(self, name, paused):
+        if name not in ("sidecar", "metadataExtraction") or type(paused) is not bool:
+            raise ValueError("Invalid maintenance queue update")
+        data = self._validate_queue(name, self._make_request(
+            "PUT", f"/api/queues/{name}", json_data={"isPaused": paused}).json())
+        if data["isPaused"] != paused:
+            raise ImmichAPIError(f"队列未达到请求状态：{name}")
+        return data
+
     @observed("download")
     def download_asset(self, asset_id, use_thumbnail=True):
         endpoint = f"/api/assets/{asset_id}/" + ("thumbnail" if use_thumbnail else "original")

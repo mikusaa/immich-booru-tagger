@@ -64,9 +64,16 @@ def test_real_process_interruption_and_reopen(tmp_path, stage, stop_signal):
             assert b'restart-test-secret' not in path.read_bytes()
 
 
-@pytest.mark.parametrize('stage', ['scan', 'cleanup-prepared', 'cleanup-deleted', 'checkpoint', 'after_checkpoint'])
-def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, stage):
+@pytest.mark.parametrize('stage,maintenance', [
+    *[(stage, False) for stage in ('scan', 'cleanup-prepared', 'cleanup-deleted', 'checkpoint', 'after_checkpoint')],
+    *[(stage, True) for stage in ('queue-intent', 'queue-paused-metadataExtraction', 'queue-paused-sidecar',
+                                  'cleanup-deleted', 'queue-resumed-sidecar', 'queue-resumed-metadataExtraction',
+                                  'checkpoint', 'after_checkpoint')],
+])
+def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, stage, maintenance):
     command = [sys.executable, str(HARNESS), str(tmp_path), '--cleanup']
+    if maintenance:
+        command.append('--maintenance')
     with (tmp_path / 'worker.log').open('w') as log:
         child = subprocess.Popen([*command, '--block', stage], stdout=log, stderr=log)
         try:
@@ -82,6 +89,9 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
                 child.wait(timeout=5)
     before = json.loads((tmp_path / 'remote.json').read_text())
     previous = TaskStore.snapshot(tmp_path / 'state')
+    if maintenance:
+        assert previous['progress']['completed'] == (1 if stage == 'after_checkpoint' else 0)
+        assert (tmp_path / 'state' / 'cleanup-queues.json').exists() == (stage not in ('checkpoint', 'after_checkpoint'))
     resumed = subprocess.run(command, capture_output=True, text=True, timeout=10)
     assert resumed.returncode == 0, resumed.stderr
     after = json.loads((tmp_path / 'remote.json').read_text())
@@ -93,6 +103,10 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
         assert after['searches'] == before['searches']
     assert not after['inferences'] and not after['assignments']
     assert len(after['removals']) == 3
+    if maintenance:
+        assert after['queues']['sidecar']['isPaused'] is True
+        assert after['queues']['metadataExtraction']['isPaused'] is False
+        assert not (tmp_path / 'state' / 'cleanup-queues.json').exists()
     for identifier in ('0', '1', '2'):
         assert {t['value'] for t in after['assets'][identifier]['tags']} == {'属性/蓝发', 'auto:processed', 'manual'}
     assert 'blue_hair' in {t['value'] for t in after['assets']['3']['tags']}
@@ -102,3 +116,4 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
     for path in (tmp_path / 'state').glob('*'):
         if path.is_file():
             assert b'restart-test-secret' not in path.read_bytes()
+            assert b'restart-admin-secret' not in path.read_bytes()

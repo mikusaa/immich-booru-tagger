@@ -46,6 +46,12 @@ class FakeImmich:
         self.drop_assignment = False
         self.drop_removal = False
         self.error_status = None
+        self.queues = {
+            name: {"name": name, "isPaused": False,
+                   "statistics": {"active": 0, "completed": 0, "failed": 0,
+                                   "delayed": 0, "waiting": 0, "paused": 0}}
+            for name in ("sidecar", "metadataExtraction")
+        }
 
     def factory(self, settings, account, *, dry_run=False):
         return ImmichClient(settings, account, dry_run=dry_run, transport=httpx.MockTransport(self.handle))
@@ -79,6 +85,15 @@ class FakeImmich:
                         if tid not in {t["id"] for t in current}:
                             current.append(tags_by_id[tid])
             return httpx.Response(200, json={"count": len(body["tagIds"])})
+        if path.startswith("/api/queues/"):
+            name = path.rsplit("/", 1)[1]
+            if name not in self.queues:
+                return httpx.Response(404)
+            if request.method == "GET":
+                return httpx.Response(200, json=copy.deepcopy(self.queues[name]))
+            assert request.method == "PUT"
+            self.queues[name]["isPaused"] = body["isPaused"]
+            return httpx.Response(200, json=copy.deepcopy(self.queues[name]))
         if path.startswith("/api/tags/") and path.endswith("/assets"):
             assert request.method == "DELETE"
             tid = path[len("/api/tags/"):-len("/assets")]

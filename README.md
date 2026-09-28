@@ -1,6 +1,6 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.1.0**。新增三种语言输出和一次性英文清理；从 `1.0.x` 升级须迁移语言配置，见下方说明。
+当前稳定版：**1.1.1**。修复英文清理的后台回写竞态与长时间等待，新增可选队列维护模式；从 `1.0.x` 升级仍须迁移语言配置，见下方说明。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
@@ -47,7 +47,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.1.0` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.1.1` 镜像：
 
 ```bash
 docker compose pull
@@ -126,10 +126,13 @@ docker compose run --rm immich-tagger \
 docker compose run --rm immich-tagger \
   python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --dry-run
 
-# 实际清理；大批量操作前先停止定时服务，避免占用同一状态目录的写入锁
+# 实际清理前先停止定时服务及其他标签写入任务
 docker compose stop immich-tagger
+# 维护模式；在 .env 配置管理员账号的 CLEANUP_ADMIN_API_KEY（queue.read、queue.update）
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english
+  python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded \
+  --confirm-cleanup-english --cleanup-maintenance
+# 清理结束且后台队列恢复后，再启动定时服务
 docker compose up -d
 ```
 
@@ -138,9 +141,11 @@ docker compose up -d
 
 两种方式都遵守图库/相册和排除范围；没有 include 时处理账号可见图片。只有图片当前已存在对应的 `属性/...`、`角色/...` 或 `评级/...` 标签才会解除英文关联。无译名、空译名、自定义完成标记、`auto:processed`、旧版 `zh/...` 都保留。不会删除图片或全局标签对象，因此标签侧边栏仍可能留下空的英文标签。
 
-实际执行必须带 `--confirm-cleanup-english`，与 `--dry-run` 互斥。支持 `--limit`、断点续跑和失败重试；重启后需要重新执行同一条确认命令，定时服务不会自动恢复清理任务。清理记录保存在 `state/cleanup.jsonl`，删除前保存 `prepared`，回读成功后保存同一操作 ID 的 `confirmed`。中断后只有 `prepared` 的操作结果尚未确认，人工恢复时应先检查实际关联，详见 [清理与恢复](docs/configuration.md#一次性英文清理)。
+实际执行必须带 `--confirm-cleanup-english`，与 `--dry-run` 互斥。`--cleanup-maintenance` 显式启用队列维护模式（已验证 Immich 3.2.2）：每张图片清理前暂停 `metadataExtraction`、`sidecar` 并等待活动任务结束，快速解除英文关联，先完成 XMP 写入、再提取元数据，恢复原有暂停状态，最终核对英文缺失及保留标签完整后才提交成功。管理员 Key 仅用于队列，图片仍由原账号操作。维护期间这两个全局队列会暂时影响其他图片的元数据处理，原本暂停的队列也会暂时运行以完成复核。
 
-Immich 的异步元数据任务可能在删除后重新写回标签。清理会在逐项删除间留出间隔，并在整张图片上连续做两次延迟回读；发现英文重新出现时，重新检查中文与范围后有限重试。持续不一致会记录失败。每张图片因此有额外等待时间；复核通过表示当时的状态，后续外部元数据导入仍可能重新添加标签。
+强制中断后保留 `state/cleanup-queues.json`，重新执行同一条维护命令会先恢复队列；也可单独运行 `python -m immich_tagger.main --restore-cleanup-queues`。支持 `--limit`、断点续跑和失败重试，定时服务不会自动恢复清理任务。逐项审计保存在 `state/cleanup.jsonl`。详见 [清理与恢复](docs/configuration.md#一次性英文清理)。
+
+没有管理员队列权限时，去掉 `--cleanup-maintenance` 使用兼容路径：逐标签至少等待 5 秒，并做两次延迟回读及有限重试。15 个标签即有至少 85 秒固定等待；日志会显示当前标签、本张累计耗时和实际等待阶段。延时只能降低 Immich 异步回写的冲突概率；两种模式都无法阻止清理结束后的外部元数据导入重新添加标签。
 
 ## 从 1.0.x 升级
 
@@ -149,7 +154,7 @@ Immich 的异步元数据任务可能在删除后重新写回标签。清理会�
 在 `.env` 中更新镜像版本：
 
 ```env
-TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.1.0
+TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.1.1
 ```
 
 然后拉取镜像并重建容器：
@@ -185,10 +190,10 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failu
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.1.0
+ghcr.io/mikusaa/immich-booru-tagger:1.1.1
 ```
 
-正式版本使用 Git 标签 `v1.1.0`，对应镜像标签 `1.1.0`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.1.1`，对应镜像标签 `1.1.1`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
 ## 文档
 

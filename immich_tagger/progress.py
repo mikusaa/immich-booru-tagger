@@ -15,7 +15,9 @@ OPERATIONS = {"read_tags": "读取账号标签", "read_album": "读取相册成�
               "read_asset": "读取资产状态", "read_details": "补取图片标签", "download": "下载预览图",
               "inference": "模型推理", "translate": "翻译标签", "create_tags": "创建标签",
               "assign_tags": "关联标签", "remove_tags": "解除英文标签关联", "read_assignments": "读取历史写入记录",
-              "readback": "回读确认", "marker": "写入完成标记",
+              "readback": "回读确认", "read_queues": "读取后台队列", "update_queues": "控制后台队列",
+              "wait_queues": "等待后台队列完成", "settle_tags": "等待标签异步回写",
+              "marker": "写入完成标记",
               "import_model": "加载模型依赖", "load_model": "准备模型（可能检查或下载权重）",
               "load_labels": "准备模型词表", "catalog": "校验中文词典", "checkpoint": "保存任务进度"}
 
@@ -100,6 +102,9 @@ class ProgressState:
                         session_elapsed_seconds=round(execution_end - self._session_started, 1),
                         assets_per_second=(round(data["session_completed"] / max(.001, execution_end - self._processing_started), 2)
                                            if self._processing_started else None))
+            data["cleanup_elapsed_seconds"] = (round(now - data["cleanup_started"], 1)
+                                                if data.get("cleanup_started") is not None else None)
+            data.pop("cleanup_started", None)
             return data
 
     def log(self, message, level=logging.INFO):
@@ -128,6 +133,15 @@ class ProgressState:
                         f"｜操作耗时 {data['operation_elapsed_seconds']:.0f} 秒")
         if data["current_asset_id"]:
             message += f"｜图片 ID：{data['current_asset_id']}"
+        if data.get("cleanup_total"):
+            message += (f"｜标签核对 {data['cleanup_index']}/{data['cleanup_total']}"
+                        f"｜当前标签：{data['cleanup_tag']}｜清理轮次：{data['cleanup_attempt']}")
+        if data.get("cleanup_elapsed_seconds") is not None:
+            message += f"｜本张累计耗时 {data['cleanup_elapsed_seconds']:.0f} 秒"
+        if data.get("queue_counts"):
+            for name, counts in data["queue_counts"].items():
+                message += (f"｜{name}：运行 {counts['active']}、等待 {counts['waiting']}"
+                            f"、暂停待处理 {counts['paused']}、延迟 {counts['delayed']}")
         self.log(message)
         warn = False
         with self.lock:
