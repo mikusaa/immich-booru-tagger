@@ -12,6 +12,7 @@ import httpx
 from tests.support.fakes import FakeEngine, FakeImmich, asset, tag
 from app.english_cleanup import EnglishTagCleaner
 from app.cleanup_queues import CleanupQueues
+from app.cleanup_state import CleanupBaseline
 from app.config import Settings
 from app.logging import setup_logging
 from app.main import parse_arguments, run_service
@@ -133,6 +134,19 @@ def main():
             if kw['status'] == 'prepared':
                 block('cleanup-prepared')
         cleanup.record_cleanup = journal
+        original_begin = CleanupBaseline.begin
+        original_resolve = CleanupBaseline.resolve
+        def begin_baseline(baseline, *a, **kw):
+            state = original_begin(baseline, *a, **kw)
+            block('cleanup-baseline')
+            return state
+        def resolve_baseline(baseline, *a, **kw):
+            block('cleanup-verified')
+            result = original_resolve(baseline, *a, **kw)
+            block('cleanup-resolved')
+            return result
+        CleanupBaseline.begin = begin_baseline
+        CleanupBaseline.resolve = resolve_baseline
         worker = EnglishTagCleaner(settings, cleanup_scope='catalog', dry_run=False,
                                    confirm_cleanup_english=True, maintenance=args.maintenance, client_factory=server.factory,
                                    engine_factory=lambda _: Engine())

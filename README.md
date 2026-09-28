@@ -1,8 +1,8 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.1.2**。修复英文清理扫描整库的问题，按已有标签检索关联图片，不要求完成全库打标或中文补全；从 `1.0.x` 升级仍须迁移语言配置，见下方说明。
+当前稳定版：**1.2.0**。英文清理新增完整标签基线与续跑保护，并逐项等待 XMP 队列排空，减少同图并发写入。程序代码统一放入 `app/`。
 
-**命令适用版本：** 本文的稳定版容器示例使用 `1.1.2` 镜像及 `python -m immich_tagger.main`。当前源码已改用 `app/` 和 `python -m app.main`，尚未发布；运行源码请按[当前源码运行](#当前源码运行未发布)构建并选择本地镜像，不要将新入口用于旧镜像。
+**入口变更：** 本文命令适用于 `1.2.0`，使用 `python -m app.main`。从 `1.1.x` 升级需同步修改手动命令和自定义启动脚本；旧镜像仍使用 `python -m immich_tagger.main`。从 `1.0.x` 升级还需迁移语言配置，见下方说明。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
@@ -18,7 +18,7 @@ hatsune_miku
 评级/全年龄
 ```
 
-## 快速开始（稳定版 1.1.2）
+## 快速开始（稳定版 1.2.0）
 
 ### 1. 准备 API Key
 
@@ -49,7 +49,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.1.2` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.2.0` 镜像：
 
 ```bash
 docker compose pull
@@ -58,7 +58,7 @@ docker compose pull
 首次启动前，先检查连接和读取标签的权限：
 
 ```bash
-docker compose run --rm immich-tagger python -m immich_tagger.main --test-connection
+docker compose run --rm immich-tagger python -m app.main --test-connection
 ```
 
 ### 3. 预览后再写入
@@ -67,14 +67,14 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --test-connec
 
 ```bash
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --dry-run --limit 20
+  python -m app.main --dry-run --limit 20
 ```
 
 确认日志中的标签后，再执行实际写入：
 
 ```bash
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --limit 20
+  python -m app.main --limit 20
 ```
 
 确认结果后启动定时服务：
@@ -112,9 +112,9 @@ TAG_LANGUAGE_MODE=chinese
 
 ```bash
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --mode backfill-zh --dry-run --limit 20
+  python -m app.main --mode backfill-zh --dry-run --limit 20
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --mode backfill-zh
+  python -m app.main --mode backfill-zh
 ```
 
 补全模式不需要下载图片或加载推理模型，会遵守配置的图库/相册范围，重复运行只补缺少的中文标签。旧版 `zh/...` 标签不会自动删除；需要清理时请在 Immich 中手动处理。
@@ -126,13 +126,13 @@ docker compose run --rm immich-tagger \
 ```bash
 # 预览（不加确认参数时也默认预览）
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --dry-run
+  python -m app.main --mode cleanup-english --cleanup-scope recorded --dry-run
 
 # 实际清理前先停止定时服务及其他标签写入任务
 docker compose stop immich-tagger
 # 维护模式；在 .env 配置管理员账号的 CLEANUP_ADMIN_API_KEY（queue.read、queue.update）
 docker compose run --rm immich-tagger \
-  python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded \
+  python -m app.main --mode cleanup-english --cleanup-scope recorded \
   --confirm-cleanup-english --cleanup-maintenance
 # 清理结束且后台队列恢复后，再启动定时服务
 docker compose up -d
@@ -145,20 +145,26 @@ docker compose up -d
 
 两种方式都遵守图库/相册和排除范围；没有 include 时处理账号可见图片。只有图片当前已存在对应的 `属性/...`、`角色/...` 或 `评级/...` 标签才会解除英文关联。无译名、空译名、自定义完成标记、`auto:processed`、旧版 `zh/...` 都保留。不会删除图片或全局标签对象，因此标签侧边栏仍可能留下空的英文标签。
 
-实际执行必须带 `--confirm-cleanup-english`，与 `--dry-run` 互斥。`--cleanup-maintenance` 显式启用队列维护模式（已验证 Immich 3.2.2）：每张图片清理前暂停 `metadataExtraction`、`sidecar` 并等待活动任务结束，快速解除英文关联，先完成 XMP 写入、再提取元数据，恢复原有暂停状态，最终核对英文缺失及保留标签完整后才提交成功。管理员 Key 仅用于队列，图片仍由原账号操作。维护期间这两个全局队列会暂时影响其他图片的元数据处理，原本暂停的队列也会暂时运行以完成复核。
+实际执行必须带 `--confirm-cleanup-english`，与 `--dry-run` 互斥。`--cleanup-maintenance` 显式启用队列维护模式（已验证 Immich 3.2.2）：每张图片清理前暂停 `metadataExtraction`、`sidecar` 并等待活动任务结束，保存标签基线，先排空已有 sidecar 积压；逐个解除英文关联，每次排空 sidecar 后才进行下一次解除，期间保持元数据提取暂停。最后排空元数据队列、恢复原有暂停状态，核对英文缺失及保留标签完整后才提交成功。管理员 Key 仅用于队列，图片仍由原账号操作。维护期间这两个全局队列会暂时影响其他图片的元数据处理，原本暂停的队列也会暂时运行以完成复核。
 
-强制中断后保留 `state/cleanup-queues.json`，重新执行同一条维护命令会先恢复队列；也可单独运行 `python -m immich_tagger.main --restore-cleanup-queues`。支持 `--limit`、断点续跑和失败重试，定时服务不会自动恢复清理任务。逐项审计保存在 `state/cleanup.jsonl`。详见 [清理与恢复](docs/configuration.md#一次性英文清理)。
+强制中断后保留 `state/cleanup-queues.json`，重新执行同一条维护命令会先恢复队列；也可单独运行 `python -m app.main --restore-cleanup-queues`。支持 `--limit`、断点续跑和失败重试，定时服务不会自动恢复清理任务。逐项审计保存在 `state/cleanup.jsonl`。详见 [清理与恢复](docs/configuration.md#一次性英文清理)。
+
+两种清理模式都会在删除前保存 `state/cleanup-pending.json`，最终复核通过后归档到 `cleanup-baselines.jsonl`。保留标签丢失时显示缺失明细并中止；续跑、更换范围或上限、普通打标和补全都不能绕过检查。原本没有标签的图片仍正常跳过。
+
+逐项等待减少本脚本产生的 XMP 并发，不能修复 Immich 吞掉文件读写错误的问题，队列空闲不代表磁盘写入成功。出现保留标签缺失时，应先修复文件读写问题，再按基线恢复缺失的保留标签后续跑；程序不会自动回填。旧版本事故发生前没有保存的标签无法由新代码补出。详见[清理记录与人工恢复](docs/configuration.md#清理记录与人工恢复)。
 
 没有管理员队列权限时，去掉 `--cleanup-maintenance` 使用兼容路径：逐标签至少等待 5 秒，并做两次延迟回读及有限重试。15 个标签即有至少 85 秒固定等待；日志会显示当前标签、本张累计耗时和实际等待阶段。延时只能降低 Immich 异步回写的冲突概率；两种模式都无法阻止清理结束后的外部元数据导入重新添加标签。
 
-## 从 1.0.x 升级
+## 升级到 1.2.0
 
-先停止写入任务并备份 `state/`。删除 `.env` 中的 `ENGLISH_TAGS_ENABLED` / `TRANSLATIONS_ENABLED`，按 [迁移对照表](docs/configuration.md#语言配置迁移) 设置 `TAG_LANGUAGE_MODE`；保留原 `state/` 和 `models/` 挂载。
+先停止写入任务并备份 `state/`，保留原 `state/` 和 `models/` 挂载。将手动命令从 `python -m immich_tagger.main` 改为 `python -m app.main`，Python 导入从 `immich_tagger` 改为 `app`；旧包入口不再保留，CLI 参数保持兼容。独立资产清理工具改为从源码根目录执行 `python -m tools.cleanup_failed_assets`，运行镜像不包含该工具。
+
+从 `1.1.x` 升级无需迁移环境变量或 SQLite。若仍使用 `1.0.x`，还需删除 `.env` 中的 `ENGLISH_TAGS_ENABLED` / `TRANSLATIONS_ENABLED`，按 [迁移对照表](docs/configuration.md#语言配置迁移) 设置 `TAG_LANGUAGE_MODE`。
 
 在 `.env` 中更新镜像版本：
 
 ```env
-TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.1.2
+TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.2.0
 ```
 
 然后拉取镜像并重建容器：
@@ -168,21 +174,21 @@ docker compose pull
 docker compose up -d
 ```
 
-保留旧语言配置会导致启动报错。升级后旧版未完成队列会重新扫描，已有标签和完成标记保留；英文清理仍须单独执行，不会自动启动。
+保留旧语言配置会导致启动报错。`1.1.x` 的配置兼容任务可继续恢复，从 `1.0.x` 升级的未完成任务会重新扫描；英文清理仍须单独执行，不会自动启动。如有 `cleanup-queues.json`，先用新入口执行原维护命令或 `--restore-cleanup-queues`。若旧版已报告保留标签缺失，先排查并恢复标签；升级不会重建事故前没有保存的基线。
 
 ## 常用操作
 
 ```bash
 # 处理一轮（最多 BATCH_SIZE 张）
-docker compose run --rm immich-tagger python -m immich_tagger.main --mode single
+docker compose run --rm immich-tagger python -m app.main --mode single
 
 # 本轮处理所有候选后退出
-docker compose run --rm immich-tagger python -m immich_tagger.main --mode continuous
+docker compose run --rm immich-tagger python -m app.main --mode continuous
 
 # 查看或重置失败记录
-docker compose run --rm immich-tagger python -m immich_tagger.main --show-failures
-docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failure ASSET_ID
-docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failures
+docker compose run --rm immich-tagger python -m app.main --show-failures
+docker compose run --rm immich-tagger python -m app.main --reset-failure ASSET_ID
+docker compose run --rm immich-tagger python -m app.main --reset-failures
 ```
 
 成功写入并回读确认后，程序才会添加 `auto:processed` 标记。部分标签写入失败时，下一轮会保留已成功的标签并补齐缺项。`state/` 同时保存 SQLite 候选队列、累计进度、失败记录、单写入锁和追加式写入记录，不要让多个容器共享同一状态目录并发运行。
@@ -194,12 +200,12 @@ docker compose run --rm immich-tagger python -m immich_tagger.main --reset-failu
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.1.2
+ghcr.io/mikusaa/immich-booru-tagger:1.2.0
 ```
 
-正式版本使用 Git 标签 `v1.1.2`，对应镜像标签 `1.1.2`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.2.0`，对应镜像标签 `1.2.0`；`1.2` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m app.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
-## 当前源码运行（未发布）
+## 从源码构建
 
 源码入口为 `python -m app.main`，不再提供 `immich_tagger` 包。先按快速开始准备 `.env`、API Key 和处理范围，再从项目根目录构建本地镜像：
 
@@ -219,7 +225,7 @@ docker compose run --rm immich-tagger python -m app.main --test-connection
 docker compose run --rm immich-tagger python -m app.main --dry-run --limit 20
 ```
 
-确认预览后，按需执行 `docker compose run --rm immich-tagger python -m app.main --limit 20`，或用 `docker compose up -d` 启动定时服务。上文其他稳定版命令用于本地镜像时，也须将 `immich_tagger.main` 替换为 `app.main`，其余参数相同。运行本地镜像无需执行 `docker compose pull`。
+确认预览后，按需执行 `docker compose run --rm immich-tagger python -m app.main --limit 20`，或用 `docker compose up -d` 启动定时服务。上文稳定版命令同样适用于本地镜像。运行本地镜像无需执行 `docker compose pull`。
 
 已有自定义启动脚本和 Python 导入需同步改为 `app`。环境变量、`models/` 和 `state/` 挂载、数据库与未完成任务保持兼容，无需清空状态。纯 Python 运行及目录说明见[开发文档](docs/development.md)。
 

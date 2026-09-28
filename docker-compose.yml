@@ -1,6 +1,6 @@
 services:
   immich-tagger:
-    image: ${TAGGER_IMAGE:-ghcr.io/mikusaa/immich-booru-tagger:1.1.2}
+    image: ${TAGGER_IMAGE:-ghcr.io/mikusaa/immich-booru-tagger:1.2.0}
     platform: linux/amd64
     container_name: immich-booru-tagger
     env_file: .env

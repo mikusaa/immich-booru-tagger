@@ -5,6 +5,7 @@ import pytest
 
 from tests.support.fakes import ALBUM, LIBRARY_A, LIBRARY_B, FakeImmich, asset, tag, bilingual_asset, paths
 from app.english_cleanup import EnglishTagCleaner
+from app.cleanup_state import CleanupSafetyError
 from app.immich_client import ImmichAPIError
 from app.main import main, parse_arguments
 from app.processor import ImmichAutoTagger, StateWriteError
@@ -551,9 +552,11 @@ def test_readback_retry_rechecks_chinese_before_deleting_again(settings):
         server.assets["0"]["tags"] = [tag("blue_hair"), tag("auto:processed"), tag("manual")]
     worker._wait_for_readback = external_change
     try:
-        assert worker.run().skipped == 1
+        with pytest.raises(CleanupSafetyError, match="属性/蓝发"):
+            worker.run()
         assert len(server.writes) == 1
         assert "blue_hair" in paths(server)
+        assert (settings.state_dir / "cleanup-pending.json").exists()
     finally:
         worker.close()
 

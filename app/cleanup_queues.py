@@ -153,6 +153,22 @@ class CleanupQueues:
             raise QueueMaintenanceError("后台任务出现新增失败，队列已恢复但本张未确认：" + ", ".join(failed))
         return True
 
+    def flush_sidecar(self):
+        """Drain one unlink's XMP work while metadata extraction stays paused.
+
+        Also used before the first unlink to separate pre-existing sidecar work
+        from this script's writes. It cannot serialize other concurrent writers.
+        """
+        state = self._load()
+        self._phase(state, "sidecar", "等待本次 XMP 写入完成，元数据提取保持暂停")
+        self.client.set_cleanup_queue_paused("sidecar", False)
+        queues = self._wait(("sidecar",), cancellable=True, paused=("metadataExtraction",))
+        if any(queues[n]["statistics"]["failed"] > state["queues"][n]["failed"] for n in QUEUES):
+            raise QueueMaintenanceError("后台任务出现新增失败，停止继续删除英文标签")
+        self.client.set_cleanup_queue_paused("sidecar", True)
+        self._wait(QUEUES, active_only=True, cancellable=True, paused=QUEUES)
+        self._phase(state, "cleaning", "本次 XMP 队列已排空，继续核对标签")
+
 
 def restore_cleanup_queues(settings):
     from .immich_client import ImmichClient

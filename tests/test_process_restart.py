@@ -66,9 +66,11 @@ def test_real_process_interruption_and_reopen(tmp_path, stage, stop_signal):
 
 
 @pytest.mark.parametrize('stage,maintenance', [
-    *[(stage, False) for stage in ('scan', 'cleanup-prepared', 'cleanup-deleted', 'checkpoint', 'after_checkpoint')],
+    *[(stage, False) for stage in ('scan', 'cleanup-baseline', 'cleanup-prepared', 'cleanup-deleted',
+                                  'cleanup-verified', 'cleanup-resolved', 'checkpoint', 'after_checkpoint')],
     *[(stage, True) for stage in ('queue-intent', 'queue-paused-metadataExtraction', 'queue-paused-sidecar',
-                                  'cleanup-deleted', 'queue-resumed-sidecar', 'queue-resumed-metadataExtraction',
+                                  'cleanup-baseline', 'cleanup-deleted', 'queue-resumed-sidecar',
+                                  'queue-resumed-metadataExtraction', 'cleanup-verified', 'cleanup-resolved',
                                   'checkpoint', 'after_checkpoint')],
 ])
 def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, stage, maintenance):
@@ -92,7 +94,8 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
     previous = TaskStore.snapshot(tmp_path / 'state')
     if maintenance:
         assert previous['progress']['completed'] == (1 if stage == 'after_checkpoint' else 0)
-        assert (tmp_path / 'state' / 'cleanup-queues.json').exists() == (stage not in ('checkpoint', 'after_checkpoint'))
+        assert (tmp_path / 'state' / 'cleanup-queues.json').exists() == (stage not in (
+            'cleanup-verified', 'cleanup-resolved', 'checkpoint', 'after_checkpoint'))
     resumed = subprocess.run(command, capture_output=True, text=True, timeout=10, cwd=PROJECT_ROOT)
     assert resumed.returncode == 0, resumed.stderr
     after = json.loads((tmp_path / 'remote.json').read_text())
@@ -104,6 +107,7 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
         assert after['searches'] == before['searches']
     assert not after['inferences'] and not after['assignments']
     assert len(after['removals']) == 3
+    assert not (tmp_path / 'state' / 'cleanup-pending.json').exists()
     if maintenance:
         assert after['queues']['sidecar']['isPaused'] is True
         assert after['queues']['metadataExtraction']['isPaused'] is False
@@ -118,3 +122,32 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
         if path.is_file():
             assert b'restart-test-secret' not in path.read_bytes()
             assert b'restart-admin-secret' not in path.read_bytes()
+
+
+@pytest.mark.parametrize('maintenance', [False, True])
+def test_cleanup_killed_after_delete_cannot_skip_subsequent_tag_loss(tmp_path, maintenance):
+    command = [sys.executable, '-m', HARNESS, str(tmp_path), '--cleanup']
+    if maintenance:
+        command.append('--maintenance')
+    with (tmp_path / 'worker.log').open('w') as log:
+        child = subprocess.Popen([*command, '--block', 'cleanup-deleted'], stdout=log, stderr=log, cwd=PROJECT_ROOT)
+        try:
+            deadline = time.monotonic() + 10
+            while not (tmp_path / 'blocked').exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert (tmp_path / 'blocked').exists(), (tmp_path / 'worker.log').read_text()
+        finally:
+            child.kill()
+            child.wait(timeout=5)
+    remote_path = tmp_path / 'remote.json'
+    remote = json.loads(remote_path.read_text())
+    remote['assets']['0']['tags'] = []  # Simulate the server losing tags while the client is stopped.
+    remote_path.write_text(json.dumps(remote))
+    baseline = (tmp_path / 'state' / 'cleanup-pending.json').read_bytes()
+    for _ in range(2):
+        resumed = subprocess.run(command, capture_output=True, text=True, timeout=10, cwd=PROJECT_ROOT)
+        assert resumed.returncode != 0
+        assert '保留标签缺失' in resumed.stderr
+        assert (tmp_path / 'state' / 'cleanup-pending.json').read_bytes() == baseline
+        assert len(json.loads(remote_path.read_text())['removals']) == 1
+        assert TaskStore.snapshot(tmp_path / 'state')['progress']['completed'] == 0

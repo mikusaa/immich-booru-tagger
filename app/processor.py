@@ -342,6 +342,8 @@ class ImmichAutoTagger:
     def _before_run(self):
         if not self.dry_run and (self.settings.state_dir / "cleanup-queues.json").exists():
             raise ProcessorError("存在未恢复的清理维护队列；请先执行 --restore-cleanup-queues，或用 --cleanup-maintenance 续跑以恢复队列")
+        if not self.dry_run and (self.settings.state_dir / "cleanup-pending.json").exists():
+            raise ProcessorError("存在未复核的清理标签基线；请先显式续跑英文清理，核对 cleanup-pending.json")
 
     def run(self, *, backfill=False, limit=None, single=False, max_cycles=None):
         if self.cancelled.is_set():

@@ -6,5 +6,5 @@ runs them through anime-oriented tag inference models, and pushes the
 resulting tags back to Immich via its official API.
 """
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 __author__ = "Immich Auto-Tagger Team"

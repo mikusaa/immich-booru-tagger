@@ -3,8 +3,10 @@ import logging
 import sqlite3
 import time
 import uuid
+from contextlib import nullcontext
 
 from .cleanup_queues import CleanupQueues, QueueMaintenanceError
+from .cleanup_state import CleanupBaseline, CleanupSafetyError
 from .immich_client import ImmichAPIError, ImmichClient, ProcessingCancelled, TagRemovalIncompleteError
 from .logging import safe_error
 from .models import AssetProcessingResult
@@ -27,6 +29,7 @@ class EnglishTagCleaner(ImmichAutoTagger):
         self._queues = None
         client_factory = kwargs.get("client_factory", ImmichClient)
         super().__init__(settings, dry_run=dry_run, **kwargs)
+        self._baseline = CleanupBaseline(self.settings)
         if self.maintenance:
             key = self.settings.cleanup_admin_api_key.strip()
             if not key:
@@ -47,11 +50,29 @@ class EnglishTagCleaner(ImmichAutoTagger):
         return f"{scope}-cleanup-{self.cleanup_scope}"
 
     def _before_run(self):
+        # Validate identity before any remote mutation. This guard precedes the
+        # task signature, filters, failure limits and candidate scanning.
+        pending = self._baseline.load(self.clients)
         if self._queues:
             self._queues.recover()
             self._queues.preflight()
-        else:
+        elif not pending:
             super()._before_run()
+        elif (self.settings.state_dir / "cleanup-queues.json").exists():
+            raise CleanupSafetyError("待复核图片的后台队列尚未恢复；请用 --cleanup-maintenance 续跑或先执行 --restore-cleanup-queues")
+        if pending:
+            if pending["maintenance"] and not self.maintenance and not self.dry_run:
+                raise CleanupSafetyError("待复核图片使用了维护模式；请带 --cleanup-maintenance 续跑")
+            client = next(c for c in self.clients if account_scope(self.settings, c.account) == pending["account"])
+            # Compatibility mode cannot observe queues; retain its spaced reads.
+            for attempt in range(2):
+                if not pending["maintenance"]:
+                    self._wait_for_readback(attempt)
+                present = self._verify_baseline(client, pending)
+            if not self.dry_run:
+                self._baseline.resolve(pending, present, outcome="recovered")
+            self.progress.log(f"未完成图片的保留标签复核通过｜图片 ID：{pending['asset_id']}"
+                              f"｜剩余计划英文 {len(pending['planned'].keys() & present)} 个，将按当前规则核对")
 
     def _signature(self, **kwargs):
         kwargs["backfill"] = True
@@ -155,7 +176,7 @@ class EnglishTagCleaner(ImmichAutoTagger):
             return
         time.sleep(min(max(5, self.settings.retry_delay * 2 ** attempt), 60))
 
-    def _remove_pairs(self, client, asset_id, pairs):
+    def _remove_pairs(self, client, asset_id, pairs, baseline):
         if not pairs:
             return []
         planned = {tag.id: (tag, translated) for tag, translated in pairs}
@@ -166,6 +187,7 @@ class EnglishTagCleaner(ImmichAutoTagger):
                 self.progress.update(cleanup_tag=tag.path, cleanup_index=index, cleanup_total=len(planned),
                                      cleanup_attempt=attempt + 1)
                 current = client.get_asset(asset_id)
+                self._baseline.verify(baseline, current)
                 if not self._in_scope(client, current):
                     break
                 if (tag.id, translated) not in {(t.id, zh) for t, zh in self._pairs(client, current)}:
@@ -180,15 +202,17 @@ class EnglishTagCleaner(ImmichAutoTagger):
                 else:
                     self._journal(client, asset_id, status="confirmed", **values)
                 with self.progress.operation("settle_tags"):
-                    self._wait_between_removals()
+                    if self._queues:
+                        self._queues.flush_sidecar()
+                    else:
+                        self._wait_between_removals()
             # Require two spaced clean reads: an immediate or single delayed read can
             # precede a queued metadata job that restores an older tag list.
             for _ in range(2):
                 with self.progress.operation("settle_tags"):
                     self._wait_for_readback(attempt)
                 current = client.get_asset(asset_id, operation="readback")
-                if current.tags is None:
-                    raise ProcessorError("资产响应缺少标签")
+                self._baseline.verify(baseline, current)
                 present = {tag.id for tag in current.tags}
                 remaining = ({tag.id for tag, _ in self._pairs(client, current)} & planned.keys()
                              if self._in_scope(client, current) else set())
@@ -223,8 +247,7 @@ class EnglishTagCleaner(ImmichAutoTagger):
                 for tag, translated in pairs:
                     self.progress.log(f"仅预览｜图片 ID：{asset.id}｜计划移除：{tag.path}｜已有中文：{translated}")
                 return result
-            result.tags_removed = (self._remove_with_queues(client, asset.id, pairs) if self.maintenance
-                                   else self._remove_pairs(client, asset.id, pairs))
+            result.tags_removed = self._remove_with_baseline(client, asset.id, pairs)
             result.success = True
             result.status = "processed" if result.tags_removed else "skipped"
         except (StateWriteError, sqlite3.Error, QueueMaintenanceError, ProcessingCancelled):
@@ -240,27 +263,50 @@ class EnglishTagCleaner(ImmichAutoTagger):
                                  cleanup_index=None, cleanup_attempt=None)
         return result
 
-    def _remove_with_queues(self, client, asset_id, pairs):
+    def _verify_baseline(self, client, state):
+        try:
+            current = client.get_asset(state["asset_id"], operation="readback")
+        except Exception as error:
+            raise CleanupSafetyError(
+                f"无法复核图片 {state['asset_id']} 的保留标签；保留 cleanup-pending.json：{error}"
+            ) from error
+        return self._baseline.verify(state, current)
+
+    def _remove_with_baseline(self, client, asset_id, pairs):
         if not pairs:
             return []
-        with self._queues.paused():
-            # Jobs active at the start may have changed the asset. Capture a fresh
-            # plan and protected tags only after they have completely stopped.
-            current = client.get_asset(asset_id)
-            if not self._in_scope(client, current):
-                return []
-            pairs = self._pairs(client, current)
-            planned = {tag.id: tag.path for tag, _ in pairs}
-            protected = {tag.id for tag in current.tags} - planned.keys()
-            removed = self._remove_pairs(client, asset_id, pairs)
-        # The shared pipeline commits this asset only after this final read.
-        current = client.get_asset(asset_id, operation="readback")
-        if current.tags is None:
-            raise ProcessorError("资产响应缺少标签")
-        present = {tag.id for tag in current.tags}
-        if not protected.issubset(present):
-            raise QueueMaintenanceError(f"后台复核发现保留标签缺失：{asset_id}，停止本轮清理")
-        if any(tid in present for tid, path in planned.items() if path in removed):
+        state = None
+        try:
+            with self._queues.paused() if self._queues else nullcontext():
+                # Capture after active jobs stop, and before releasing any queued
+                # XMP writes or sending our first DELETE.
+                current = client.get_asset(asset_id)
+                if not self._in_scope(client, current):
+                    return []
+                pairs = self._pairs(client, current)
+                if not pairs:
+                    return []
+                state = self._baseline.begin(client, current, pairs,
+                                             run_id=self.progress.snapshot()["run_id"], maintenance=self.maintenance)
+                if self._queues:
+                    self._queues.flush_sidecar()
+                removed = self._remove_pairs(client, asset_id, pairs, state)
+        except (QueueMaintenanceError, StateWriteError, sqlite3.Error, ProcessingCancelled):
+            # Keep the durable baseline across cancellation and uncertain queue
+            # or disk state, even if the queues themselves have been restored.
+            raise
+        except Exception:
+            if state is not None:
+                if not self.maintenance:
+                    self._wait_between_removals()
+                present = self._verify_baseline(client, state)
+                self._baseline.resolve(state, present, outcome="interrupted")
+            raise
+        # Queue restoration is complete, but asset success is still uncommitted.
+        present = self._verify_baseline(client, state)
+        reappeared = any(tid in present for tid in state["planned"] if state["tags"][tid] in removed)
+        self._baseline.resolve(state, present, outcome="incomplete" if reappeared else "verified")
+        if reappeared:
             raise TagRemovalIncompleteError(f"后台复核发现英文标签重新出现：{asset_id}")
         return removed
 
