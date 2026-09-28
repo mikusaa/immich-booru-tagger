@@ -1,5 +1,12 @@
 # 更新记录
 
+## 未发布
+
+- 主程序目录及 Python 包名从 `immich_tagger` 改为 `app`，入口统一为 `python -m app.main`；不保留旧包兼容入口。现有自定义命令、导入及启动脚本需同步更新，CLI 参数与运行行为保持不变。
+- 英文标签清理模块更名为 `app/english_cleanup.py`；独立资产清理工具归入 `tools/`，使用 `python -m tools.cleanup_failed_assets`。
+- 公共测试模拟对象和重启辅助程序归入 `tests/support/`，同步调整 Docker、CI 和容器恢复验收。移除未使用的性能监控模块，停止跟踪根目录旧的空失败记录。
+- 词典、模型和状态路径保持不变，数据库、任务指纹及恢复记录无需迁移。版本号与 Compose 默认镜像仍为 `1.1.2`；新入口需要当前源码或本地构建镜像，已发布镜像继续使用原入口。
+
 ## 1.1.2 — 2026-09-28
 
 修复英文清理扫描整库的问题，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.1.2`（Linux AMD64 / CPU）。

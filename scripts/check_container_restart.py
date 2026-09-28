@@ -26,7 +26,7 @@ def check(image, scenario):
         try:
             docker('run', '-d', '--name', name, '--network', 'none', '--user', user,
                    '--label', 'immich-tagger.restart-test=true', '-v', f'{root}:/fixture', image,
-                   'python', 'tests/restart_harness.py', '/fixture', '--service', '--block', stage)
+                   'python', '-m', 'tests.support.restart_harness', '/fixture', '--service', '--block', stage)
             deadline = time.monotonic() + 30
             while not (root / 'blocked').exists() and time.monotonic() < deadline:
                 status = json.loads(docker('inspect', '--format', '{{json .State}}', name))
@@ -45,10 +45,10 @@ def check(image, scenario):
                 docker('kill', '--signal', 'KILL', name)
             before = json.loads((root / 'remote.json').read_text())
             docker('run', '--rm', '--network', 'none', '--user', user, '-v', f'{root}:/fixture', image,
-                             'python', 'tests/restart_harness.py', '/fixture', '--service')
+                             'python', '-m', 'tests.support.restart_harness', '/fixture', '--service')
             after = json.loads((root / 'remote.json').read_text())
             snapshot = json.loads(docker('run', '--rm', '--network', 'none', '--user', user, '-v', f'{root}:/fixture', image,
-                'python', '-c', "import json; from immich_tagger.task_store import TaskStore; "
+                'python', '-c', "import json; from app.task_store import TaskStore; "
                                "print(json.dumps(TaskStore.snapshot('/fixture/state')))"))
             assert snapshot['progress']['completed'] == snapshot['progress']['total'] == 3
             assert snapshot['progress']['task_status'] == 'completed'

@@ -2,6 +2,8 @@
 
 当前稳定版：**1.1.2**。修复英文清理扫描整库的问题，按已有标签检索关联图片，不要求完成全库打标或中文补全；从 `1.0.x` 升级仍须迁移语言配置，见下方说明。
 
+**命令适用版本：** 本文的稳定版容器示例使用 `1.1.2` 镜像及 `python -m immich_tagger.main`。当前源码已改用 `app/` 和 `python -m app.main`，尚未发布；运行源码请按[当前源码运行](#当前源码运行未发布)构建并选择本地镜像，不要将新入口用于旧镜像。
+
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
 它以独立容器运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
@@ -16,7 +18,7 @@ hatsune_miku
 评级/全年龄
 ```
 
-## 快速开始
+## 快速开始（稳定版 1.1.2）
 
 ### 1. 准备 API Key
 
@@ -196,6 +198,30 @@ ghcr.io/mikusaa/immich-booru-tagger:1.1.2
 ```
 
 正式版本使用 Git 标签 `v1.1.2`，对应镜像标签 `1.1.2`；`1.1` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m immich_tagger.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+
+## 当前源码运行（未发布）
+
+源码入口为 `python -m app.main`，不再提供 `immich_tagger` 包。先按快速开始准备 `.env`、API Key 和处理范围，再从项目根目录构建本地镜像：
+
+```bash
+docker build --platform linux/amd64 --target runtime -t immich-booru-tagger:local .
+```
+
+将 `.env` 中的 `TAGGER_IMAGE` 改为本地镜像名，Compose 才会运行新构建的代码：
+
+```env
+TAGGER_IMAGE=immich-booru-tagger:local
+```
+
+```bash
+docker compose run --rm immich-tagger python -m app.main --version
+docker compose run --rm immich-tagger python -m app.main --test-connection
+docker compose run --rm immich-tagger python -m app.main --dry-run --limit 20
+```
+
+确认预览后，按需执行 `docker compose run --rm immich-tagger python -m app.main --limit 20`，或用 `docker compose up -d` 启动定时服务。上文其他稳定版命令用于本地镜像时，也须将 `immich_tagger.main` 替换为 `app.main`，其余参数相同。运行本地镜像无需执行 `docker compose pull`。
+
+已有自定义启动脚本和 Python 导入需同步改为 `app`。环境变量、`models/` 和 `state/` 挂载、数据库与未完成任务保持兼容，无需清空状态。纯 Python 运行及目录说明见[开发文档](docs/development.md)。
 
 ## 文档
 

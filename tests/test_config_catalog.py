@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from immich_tagger.config import Settings
-from immich_tagger.translation_catalog import TranslationCatalog
-from conftest import LIBRARY_A, LIBRARY_B
+from app.config import Settings
+from app.translation_catalog import TranslationCatalog
+from tests.support.fakes import LIBRARY_A, LIBRARY_B
 
 
 @pytest.mark.parametrize("raw", [f"{LIBRARY_A},{LIBRARY_B},{LIBRARY_A}", json.dumps([LIBRARY_A, LIBRARY_B])])
@@ -75,12 +75,12 @@ def test_language_default_invalid_and_disabled_env_file(settings, monkeypatch, t
 
 def test_help_without_credentials_or_machine_learning_dependencies(settings, tmp_path):
     root = str(Path(__file__).resolve().parents[1])
-    result = subprocess.run([sys.executable, "-m", "immich_tagger.main", "--help"],
+    result = subprocess.run([sys.executable, "-m", "app.main", "--help"],
                             cwd=tmp_path, env={**os.environ, "PYTHONPATH": root}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "backfill-zh" in result.stdout
     assert "cleanup-english" in result.stdout
-    result = subprocess.run([sys.executable, "-c", "import sys; import immich_tagger.main; "
+    result = subprocess.run([sys.executable, "-c", "import sys; import app.main; "
                              "assert 'torch' not in sys.modules; assert 'wdtagger' not in sys.modules"],
                             cwd=tmp_path, env={**os.environ, "PYTHONPATH": root}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

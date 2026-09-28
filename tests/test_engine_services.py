@@ -8,10 +8,10 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from immich_tagger.health_server import HealthServer
-from immich_tagger.models import RunResult
-from immich_tagger.scheduler import Scheduler
-from immich_tagger.tagging_engine import TaggingEngineError, WD14TaggingEngine
+from app.health_server import HealthServer
+from app.models import RunResult
+from app.scheduler import Scheduler
+from app.tagging_engine import TaggingEngineError, WD14TaggingEngine
 
 
 def test_model_adapter_vocabulary_cache_thresholds_and_alpha(settings, tmp_path, monkeypatch):

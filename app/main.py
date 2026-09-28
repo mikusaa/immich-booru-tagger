@@ -139,7 +139,7 @@ def main(argv=None):
             return 0
         from .processor import ImmichAutoTagger
         if args.mode == "cleanup-english":
-            from .cleanup import EnglishTagCleaner
+            from .english_cleanup import EnglishTagCleaner
             processor = EnglishTagCleaner(settings, dry_run=args.dry_run, cleanup_scope=args.cleanup_scope,
                                          confirm_cleanup_english=args.confirm_cleanup_english,
                                          maintenance=args.cleanup_maintenance)

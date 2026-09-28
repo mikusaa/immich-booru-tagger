@@ -7,17 +7,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from conftest import ALBUM, LIBRARY_A, LIBRARY_B, FakeEngine, FakeImmich, asset, tag
-from immich_tagger.health_server import HealthServer
-from immich_tagger.logging import ZonedFormatter
-from immich_tagger.main import main
-from immich_tagger.models import AssetProcessingResult
-from immich_tagger.processor import ImmichAutoTagger
-from immich_tagger.progress import ProgressState
-from immich_tagger.scheduler import Scheduler
-from immich_tagger.state import writer_lock
-from immich_tagger.task_store import TaskStore
-from test_processor import processor
+from tests.support.fakes import ALBUM, LIBRARY_A, LIBRARY_B, FakeEngine, FakeImmich, asset, tag, processor
+from app.health_server import HealthServer
+from app.logging import ZonedFormatter
+from app.main import main
+from app.models import AssetProcessingResult
+from app.processor import ImmichAutoTagger
+from app.progress import ProgressState
+from app.scheduler import Scheduler
+from app.state import writer_lock
+from app.task_store import TaskStore
 
 
 def interrupt_after_first(settings, server, **kwargs):
@@ -235,7 +234,7 @@ def test_unknown_database_version_is_never_recreated(settings):
 
 
 def test_status_without_record_does_not_create_directory(settings, monkeypatch, capsys):
-    monkeypatch.setattr('immich_tagger.main.Settings', lambda **_: settings)
+    monkeypatch.setattr('app.main.Settings', lambda **_: settings)
     assert main(['--progress-status']) == 0
     value = json.loads(capsys.readouterr().out)
     assert value['running'] is None and value['live'] is False
@@ -309,7 +308,7 @@ def test_heartbeat_during_blocked_model_health_and_last_progress(settings, caplo
 
 def test_slow_operation_warning_throttled_and_time_zone(settings, monkeypatch, caplog):
     clock = [100.0]
-    monkeypatch.setattr('immich_tagger.progress.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('app.progress.time.monotonic', lambda: clock[0])
     progress = ProgressState(settings)
     caplog.set_level(logging.INFO, logger='progress')
     with progress.operation('inference'):
@@ -488,7 +487,7 @@ def test_scheduler_resume_disabled_waits_without_running(settings):
 
 def test_health_only_does_not_migrate_or_contact_immich(settings, monkeypatch):
     import signal
-    from immich_tagger.main import parse_arguments, run_service
+    from app.main import parse_arguments, run_service
     settings.state_dir.mkdir()
     (settings.state_dir / 'failures-old.json').write_text('{"failures": {}}')
     server = FakeImmich()
@@ -522,8 +521,8 @@ def test_retry_logs_are_chinese_and_omit_response_credentials(settings, monkeypa
         if len(attempts) == 1:
             return httpx.Response(429, headers={'Retry-After': '2'}, text='test-key')
         return httpx.Response(200, json=[])
-    monkeypatch.setattr('immich_tagger.immich_client.time.sleep', lambda _: None)
-    from immich_tagger.immich_client import ImmichClient
+    monkeypatch.setattr('app.immich_client.time.sleep', lambda _: None)
+    from app.immich_client import ImmichClient
     caplog.set_level(logging.WARNING)
     with ImmichClient(settings, transport=httpx.MockTransport(handle)) as client:
         client.get_all_tags()
@@ -534,7 +533,7 @@ def test_retry_logs_are_chinese_and_omit_response_credentials(settings, monkeypa
 
 def test_finished_rate_excludes_scheduler_idle_time(settings, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr('immich_tagger.progress.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('app.progress.time.monotonic', lambda: clock[0])
     progress = ProgressState(settings)
     clock[0] += 20  # scanning/model preparation
     progress.phase('processing', '开始处理')

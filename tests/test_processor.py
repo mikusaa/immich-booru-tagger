@@ -2,16 +2,11 @@ import json
 
 import pytest
 
-from immich_tagger.processor import ImmichAutoTagger
-from immich_tagger.models import TagPrediction
-from immich_tagger.state import writer_lock
-from immich_tagger.tagging_engine import TaggingEngineError
-from conftest import FakeEngine, FakeImmich, asset, tag
-
-
-def processor(settings, server, *, dry_run=False, engine=None):
-    return ImmichAutoTagger(settings, client_factory=server.factory, dry_run=dry_run,
-                            engine_factory=lambda _: engine or FakeEngine())
+from app.processor import ImmichAutoTagger
+from app.models import TagPrediction
+from app.state import writer_lock
+from app.tagging_engine import TaggingEngineError
+from tests.support.fakes import FakeEngine, FakeImmich, asset, tag, processor
 
 
 @pytest.mark.parametrize("legacy", [False, True])

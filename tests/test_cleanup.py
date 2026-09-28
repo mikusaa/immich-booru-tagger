@@ -3,17 +3,13 @@ import json
 import httpx
 import pytest
 
-from conftest import ALBUM, LIBRARY_A, LIBRARY_B, FakeImmich, asset, tag
-from immich_tagger.cleanup import EnglishTagCleaner
-from immich_tagger.immich_client import ImmichAPIError
-from immich_tagger.main import main, parse_arguments
-from immich_tagger.processor import ImmichAutoTagger, StateWriteError
-from immich_tagger.state import account_scope, record_assignment
-from immich_tagger.task_store import TaskStore
-
-
-def bilingual_asset(number, **values):
-    return asset(number, tags=list(map(tag, ["blue_hair", "属性/蓝发", "auto:processed", "manual"])), **values)
+from tests.support.fakes import ALBUM, LIBRARY_A, LIBRARY_B, FakeImmich, asset, tag, bilingual_asset, paths
+from app.english_cleanup import EnglishTagCleaner
+from app.immich_client import ImmichAPIError
+from app.main import main, parse_arguments
+from app.processor import ImmichAutoTagger, StateWriteError
+from app.state import account_scope, record_assignment
+from app.task_store import TaskStore
 
 
 def cleaner(settings, server, *, scope="catalog", dry_run=False, **kwargs):
@@ -35,10 +31,6 @@ def maintenance_cleaner(settings, server, *, scope="catalog"):
 def record(settings, asset_id="0", paths=("blue_hair",), account=None):
     account = account or settings.get_library_config()[0]
     record_assignment(settings.state_dir, account_scope(settings, account), asset_id, list(paths))
-
-
-def paths(server, asset_id="0"):
-    return {t["value"] for t in server.assets[asset_id]["tags"]}
 
 
 @pytest.mark.parametrize("scope", ["recorded", "catalog"])
@@ -330,7 +322,7 @@ def test_journal_write_failure_before_delete_stops_run(settings, monkeypatch):
     server = FakeImmich([bilingual_asset(0)])
     def fail(*args, **kwargs):
         raise OSError("disk full")
-    monkeypatch.setattr("immich_tagger.cleanup.record_cleanup", fail)
+    monkeypatch.setattr("app.english_cleanup.record_cleanup", fail)
     worker = cleaner(settings, server)
     try:
         with pytest.raises(StateWriteError):
@@ -358,15 +350,15 @@ def test_cleanup_default_preview_and_explicit_confirmation(settings):
 @pytest.mark.parametrize("confirm", [False, True])
 def test_cli_selects_cleanup_and_preview_safety(settings, monkeypatch, confirm):
     server = FakeImmich([bilingual_asset(0)])
-    monkeypatch.setattr("immich_tagger.main.Settings", lambda **_: settings)
+    monkeypatch.setattr("app.main.Settings", lambda **_: settings)
     factory = EnglishTagCleaner
     monkeypatch.setattr(factory, "_wait_for_readback", lambda *args: None)
     monkeypatch.setattr(factory, "_wait_between_removals", lambda *args: None)
-    monkeypatch.setattr("immich_tagger.cleanup.EnglishTagCleaner",
+    monkeypatch.setattr("app.english_cleanup.EnglishTagCleaner",
                         lambda *a, **kw: factory(*a, **kw, client_factory=server.factory))
     async def start(_):
         pass
-    monkeypatch.setattr("immich_tagger.health_server.HealthServer.start", start)
+    monkeypatch.setattr("app.health_server.HealthServer.start", start)
     flags = ["--mode", "cleanup-english", "--cleanup-scope", "catalog"]
     if confirm:
         flags += ["--confirm-cleanup-english"]
@@ -493,7 +485,7 @@ def test_failure_limit_and_cli_reset_include_cleanup(settings, monkeypatch, caps
         assert worker.run().processed == 0
     finally:
         worker.close()
-    monkeypatch.setattr("immich_tagger.main.Settings", lambda **_: settings)
+    monkeypatch.setattr("app.main.Settings", lambda **_: settings)
     assert main(["--show-failures"]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert "cleanup-catalog" in summary["User_1"] and "cleanup-recorded" in summary["User_1"]

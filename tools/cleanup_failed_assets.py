@@ -14,11 +14,11 @@ import json
 import sys
 import argparse
 from typing import List, Dict, Optional
-from immich_tagger.immich_client import ImmichClient
-from immich_tagger.failure_tracker import FailureTracker
-from immich_tagger.logging import get_logger
-from immich_tagger.config import get_settings
-from immich_tagger.state import account_scope
+from app.immich_client import ImmichClient
+from app.failure_tracker import FailureTracker
+from app.logging import get_logger
+from app.config import get_settings
+from app.state import account_scope
 
 
 class AssetCleanupError(Exception):
@@ -266,16 +266,16 @@ def main():
         epilog="""
 Examples:
   # Preview what would be deleted (safe)
-  python cleanup_failed_assets.py --dry-run
+  python -m tools.cleanup_failed_assets --dry-run
   
   # Interactive cleanup with confirmations
-  python cleanup_failed_assets.py
+  python -m tools.cleanup_failed_assets
   
   # Automated cleanup (no confirmations - USE WITH CAUTION!)
-  python cleanup_failed_assets.py --force
+  python -m tools.cleanup_failed_assets --force
   
   # Clean up specific asset IDs only
-  python cleanup_failed_assets.py --asset-ids asset-id-1 asset-id-2
+  python -m tools.cleanup_failed_assets --asset-ids asset-id-1 asset-id-2
   
 CAUTION: This script permanently deletes assets from Immich.
 Always use --dry-run first to preview the changes!

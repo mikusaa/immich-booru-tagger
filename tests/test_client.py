@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from immich_tagger.immich_client import ImmichAPIError, ImmichClient
-from conftest import ALBUM, LIBRARY_A, LIBRARY_B, FakeImmich, asset, tag
+from app.immich_client import ImmichAPIError, ImmichClient
+from tests.support.fakes import ALBUM, LIBRARY_A, LIBRARY_B, FakeImmich, asset, tag
 
 
 @pytest.mark.parametrize("legacy,reject", [(False, False), (True, False), (True, True)])
@@ -151,7 +151,7 @@ def test_transport_retry(settings, monkeypatch):
     settings.max_retries = 2
     attempts = []
     sleeps = []
-    monkeypatch.setattr("immich_tagger.immich_client.time.sleep", sleeps.append)
+    monkeypatch.setattr("app.immich_client.time.sleep", sleeps.append)
     def handle(request):
         attempts.append(request)
         if len(attempts) < 3:

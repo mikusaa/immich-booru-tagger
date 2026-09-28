@@ -8,17 +8,15 @@ import signal
 import sys
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import httpx
-from conftest import FakeEngine, FakeImmich, asset, tag
-from immich_tagger.cleanup import EnglishTagCleaner
-from immich_tagger.cleanup_queues import CleanupQueues
-from immich_tagger.config import Settings
-from immich_tagger.logging import setup_logging
-from immich_tagger.main import parse_arguments, run_service
-from immich_tagger.processor import ImmichAutoTagger
-from immich_tagger.task_store import TaskStore
+from tests.support.fakes import FakeEngine, FakeImmich, asset, tag
+from app.english_cleanup import EnglishTagCleaner
+from app.cleanup_queues import CleanupQueues
+from app.config import Settings
+from app.logging import setup_logging
+from app.main import parse_arguments, run_service
+from app.processor import ImmichAutoTagger
+from app.task_store import TaskStore
 
 
 def main():
@@ -128,7 +126,7 @@ def main():
                 block('queue-intent')
         CleanupQueues._save = save_intent
     if args.cleanup:
-        import immich_tagger.cleanup as cleanup
+        import app.english_cleanup as cleanup
         original_journal = cleanup.record_cleanup
         def journal(*a, **kw):
             original_journal(*a, **kw)

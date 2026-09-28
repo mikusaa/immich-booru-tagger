@@ -33,4 +33,6 @@ docker build --platform linux/amd64 -t immich-booru-tagger:local .
 
 正式版本使用 Git 标签 `v1.1.2`，GHCR 镜像为 `ghcr.io/mikusaa/immich-booru-tagger:1.1.2`。Compose 和 `.env.example` 默认固定该版本。发布内容与升级说明见 [更新记录](../CHANGELOG.md)。
 
-发布前确认 `immich_tagger.__version__`、Compose 默认镜像和环境变量示例版本一致。推送版本标签后，等待测试、离线重启验收、运行镜像冒烟检查和 GHCR 推送全部成功，再创建 GitHub Release。不要覆盖已发布的版本标签；修复使用下一个补丁版本。
+当前源码已将包名改为 `app`，入口为 `python -m app.main`，此变更尚未发布。已发布的 `1.1.2` 镜像使用旧入口；本地验证使用 `immich-booru-tagger:local`，见 [README](../README.md#当前源码运行未发布)。目录整理本身不调整版本号或默认镜像。
+
+下一次发布前确认 `app.__version__`、Compose 默认镜像和环境变量示例版本一致，并将 README 的稳定版入口更新为 `app.main`。推送版本标签后，等待测试、离线重启验收、运行镜像冒烟检查和 GHCR 推送全部成功，再创建 GitHub Release。不要覆盖已发布的版本标签；使用新的版本号。

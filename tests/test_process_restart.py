@@ -7,10 +7,11 @@ import time
 
 import pytest
 
-from immich_tagger.task_store import TaskStore
+from app.task_store import TaskStore
 
 
-HARNESS = Path(__file__).with_name('restart_harness.py')
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+HARNESS = 'tests.support.restart_harness'
 
 
 @pytest.mark.parametrize('stage,stop_signal', [
@@ -20,8 +21,8 @@ HARNESS = Path(__file__).with_name('restart_harness.py')
 ])
 def test_real_process_interruption_and_reopen(tmp_path, stage, stop_signal):
     with (tmp_path / 'worker.log').open('w') as log:
-        child = subprocess.Popen([sys.executable, str(HARNESS), str(tmp_path), '--block', stage],
-                                 stdout=log, stderr=log)
+        child = subprocess.Popen([sys.executable, '-m', HARNESS, str(tmp_path), '--block', stage],
+                                 stdout=log, stderr=log, cwd=PROJECT_ROOT)
         try:
             deadline = time.monotonic() + 10
             while not (tmp_path / 'blocked').exists() and child.poll() is None and time.monotonic() < deadline:
@@ -35,7 +36,7 @@ def test_real_process_interruption_and_reopen(tmp_path, stage, stop_signal):
                 child.wait(timeout=5)
     before = json.loads((tmp_path / 'remote.json').read_text())
     checkpoint = TaskStore.snapshot(tmp_path / 'state')
-    resumed = subprocess.run([sys.executable, str(HARNESS), str(tmp_path)], capture_output=True, text=True, timeout=10)
+    resumed = subprocess.run([sys.executable, '-m', HARNESS, str(tmp_path)], capture_output=True, text=True, timeout=10, cwd=PROJECT_ROOT)
     assert resumed.returncode == 0, resumed.stderr
     after = json.loads((tmp_path / 'remote.json').read_text())
     snapshot = TaskStore.snapshot(tmp_path / 'state')
@@ -71,11 +72,11 @@ def test_real_process_interruption_and_reopen(tmp_path, stage, stop_signal):
                                   'checkpoint', 'after_checkpoint')],
 ])
 def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, stage, maintenance):
-    command = [sys.executable, str(HARNESS), str(tmp_path), '--cleanup']
+    command = [sys.executable, '-m', HARNESS, str(tmp_path), '--cleanup']
     if maintenance:
         command.append('--maintenance')
     with (tmp_path / 'worker.log').open('w') as log:
-        child = subprocess.Popen([*command, '--block', stage], stdout=log, stderr=log)
+        child = subprocess.Popen([*command, '--block', stage], stdout=log, stderr=log, cwd=PROJECT_ROOT)
         try:
             deadline = time.monotonic() + 10
             while not (tmp_path / 'blocked').exists() and child.poll() is None and time.monotonic() < deadline:
@@ -92,7 +93,7 @@ def test_cleanup_survives_kill_with_audit_and_no_duplicate_removal(tmp_path, sta
     if maintenance:
         assert previous['progress']['completed'] == (1 if stage == 'after_checkpoint' else 0)
         assert (tmp_path / 'state' / 'cleanup-queues.json').exists() == (stage not in ('checkpoint', 'after_checkpoint'))
-    resumed = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    resumed = subprocess.run(command, capture_output=True, text=True, timeout=10, cwd=PROJECT_ROOT)
     assert resumed.returncode == 0, resumed.stderr
     after = json.loads((tmp_path / 'remote.json').read_text())
     snapshot = TaskStore.snapshot(tmp_path / 'state')

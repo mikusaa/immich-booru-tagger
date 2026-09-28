@@ -1,5 +1,21 @@
 # 开发与测试
 
+## 目录与入口
+
+```text
+app/            主程序，内部按模块平铺
+tests/          自动化测试；conftest.py 仅提供 pytest fixtures
+tests/support/  公共模拟对象、测试数据构造函数和重启辅助程序
+tools/          独立维护工具，不进入运行镜像
+scripts/        词典构建与容器验收脚本
+data/           随程序发布的词典及来源许可
+docs/           配置、开发与发布说明
+models/         本地模型缓存，不纳入版本管理
+state/          本地状态与审计记录，不纳入版本管理
+```
+
+所有开发命令从项目根目录执行。当前源码的程序入口为 `python -m app.main`，导入使用 `app.*`；已发布的 `1.1.2` 镜像仍使用旧入口，镜像选择见 [README](../README.md#当前源码运行未发布)。
+
 ## 本地环境
 
 项目使用 Python 3.11。只运行测试、连接检查、中文补全或英文清理时，安装核心测试依赖即可：
@@ -8,6 +24,7 @@
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-test.txt
+python -m app.main --help
 python -m pytest -q
 ```
 
@@ -24,7 +41,7 @@ pip install -r requirements.txt
 
 ```bash
 python -m pytest -q
-python -m compileall -q immich_tagger
+python -m compileall -q app tests tools scripts
 docker build --target test -t immich-booru-tagger:test .
 docker run --rm --network none immich-booru-tagger:test
 ```
@@ -37,10 +54,12 @@ docker run --rm --network none immich-booru-tagger:test
 
 ## 模块职责
 
+以下模块均位于 `app/`，从 `main.py` 的命令行解析与服务组装开始阅读。
+
 - `config.py`：环境变量解析、认证互斥和 UUID 校验。
 - `immich_client.py`：Immich API、搜索回退、标签缓存、写入回读和下载预览图。
 - `processor.py`：快照、范围检查、推理/中文补全、失败记录和完成标记。
-- `cleanup.py`：历史记录/词典筛选、逐项解关联和删除前清单，复用处理器队列与锁。
+- `english_cleanup.py`：历史记录/词典筛选、逐项解关联和删除前清单，复用处理器队列与锁。
 - `cleanup_queues.py`：持久化队列维护状态，协调 XMP 写入与元数据提取，支持中断后独立恢复。
 - `tagging_engine.py`：WD14 默认后端与可选 DeepDanbooru 后端。
 - `translation_catalog.py`：离线词典、覆盖项和 `属性/`、`角色/`、`评级/` 路径生成。
@@ -67,11 +86,20 @@ python scripts/build_catalog.py \
 
 DeepDanbooru 不装进默认 CPU 镜像，也不会自动下载项目目录。在独立环境安装 `requirements-deepdanbooru.txt`，设置 `TAGGING_MODEL=deepdanbooru` 与 `DEEPDANBOORU_PROJECT_DIR` 后再运行。该后端目前只有代码适配，未纳入真实模型验收。
 
-根目录的 `cleanup_failed_assets.py` 是独立的资产清理工具，不属于标签处理流程，也不打包进运行镜像。识别失败时应先排查模型、网络和图片格式。
+## 独立资产清理工具
+
+`tools/cleanup_failed_assets.py` 是删除失败资产的独立工具，与 `app/english_cleanup.py` 的英文标签清理不同，不打包进运行镜像。识别失败时应先排查模型、网络和图片格式。从项目根目录查看帮助或预览：
+
+```bash
+python -m tools.cleanup_failed_assets --help
+python -m tools.cleanup_failed_assets --dry-run
+```
 
 ## 中断恢复验收
 
 `tests/test_process_restart.py` 启动真实子进程，在扫描、模型准备、推理、写入标签、写入完成标记和本地提交前后发送 SIGTERM / SIGKILL，使用同一数据库恢复并校验无重复写入、无需重新扫描及累计额度。
+
+公共模拟对象位于 `tests/support/fakes.py`，测试直接从 `tests.support.fakes` 导入。重启辅助程序在本地和容器中均通过 `python -m tests.support.restart_harness` 启动；本地子进程的工作目录显式设为项目根目录。
 
 同一子进程测试也覆盖清理扫描、日志落盘、远程删除成功和本地提交前后的 SIGKILL，验证恢复依据完整、不会重复删除且不会加载模型。维护模式另覆盖恢复意图落盘、两队列分别暂停、远程删除、两队列分别恢复及本地检查点前后的 8 个 SIGKILL 场景，验证原始暂停状态恢复且复核前不提交成功。
 

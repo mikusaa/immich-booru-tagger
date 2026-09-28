@@ -2,6 +2,8 @@
 
 本文补充 README 中的高级配置。所有环境变量都写在 `.env`，Compose 会通过 `env_file` 传入容器。
 
+本文命令对应当前源码的 `python -m app.main` 入口。使用 Compose 时，先按 [README 的源码运行步骤](../README.md#当前源码运行未发布)构建并选择本地镜像；已发布的 `1.1.2` 镜像仍须使用 `python -m immich_tagger.main`，其余参数相同。
+
 ## 认证与处理范围
 
 三种认证方式只能启用一种：
@@ -100,15 +102,15 @@ SEARCH_API=auto
 
 ```bash
 # 查看前 20 张可清理图片的计划
-python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --dry-run --limit 20
+python -m app.main --mode cleanup-english --cleanup-scope recorded --dry-run --limit 20
 # 兼容路径；同一条命令可在中断后重新运行续跑
-python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english
+python -m app.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english
 # 维护模式；需要管理员账号的 CLEANUP_ADMIN_API_KEY（queue.read、queue.update）
-python -m immich_tagger.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english --cleanup-maintenance
+python -m app.main --mode cleanup-english --cleanup-scope recorded --confirm-cleanup-english --cleanup-maintenance
 # 强制退出后只恢复后台队列，不继续清理
-python -m immich_tagger.main --restore-cleanup-queues
+python -m app.main --restore-cleanup-queues
 # 历史记录不完整时，显式扩大到词典匹配项；先预览
-python -m immich_tagger.main --mode cleanup-english --cleanup-scope catalog --dry-run
+python -m app.main --mode cleanup-english --cleanup-scope catalog --dry-run
 ```
 
 `recorded` 默认读取 `state/assignments.jsonl`，按服务地址和 API Key 摘要匹配账号，逐张读取这些图片的当前标签和范围，避免整库搜索。文件缺失或任一行损坏会中止，不会自动切换到 `catalog`。更换 API Key 或地址后摘要改变，旧账号记录不会自动匹配；应保留原身份或审阅后显式使用 `catalog`。日志表示历史新增行为，无法判断用户后来删除又手工重加的同名标签。
@@ -170,7 +172,7 @@ HTTP 临时故障也按 `MAX_RETRIES` 重试；复核重试耗尽或其他单张
 ```bash
 docker compose logs -f immich-tagger
 curl -s http://127.0.0.1:8000/metrics
-docker compose run --rm immich-tagger python -m immich_tagger.main --progress-status
+docker compose run --rm immich-tagger python -m app.main --progress-status
 ```
 
 日志时间使用 `TIMEZONE` 并带 UTC 偏移。阶段切换、重试和错误立即记录；运行时由独立报告线程定时显示状态，即使当前请求或模型调用尚未返回，也能看到操作名称和等待时间。默认 INFO 输出汇总，DEBUG 输出单张结果和标签明细；dry-run 始终在 INFO 显示计划添加的标签；清理预览显示待移除英文及对应中文。

@@ -38,6 +38,7 @@
 
 ## 构建与文档
 
+- 主程序统一放在 `app/`，当前源码入口为 `python -m app.main`；测试辅助代码集中到 `tests/support/`，独立资产清理工具位于 `tools/`。
 - Compose 默认拉取 GHCR 镜像，本地构建通过显式 `docker build` 完成，不会在 `docker compose up` 时隐式构建。
 - 新增 GitHub Actions：PR 运行测试和离线冒烟，`main`/版本标签通过 `GITHUB_TOKEN` 发布 `linux/amd64` 镜像。
 - 测试拆分为核心、测试和可选 DeepDanbooru 依赖，新增配置、客户端、处理器和服务测试。
@@ -47,4 +48,4 @@
 
 - 仍通过 Immich 官方 API 工作，不改 Immich 核心代码和原图。
 - 仍以 `auto:processed` 做常规增量标记，支持连续运行和定时运行。
-- `cleanup_failed_assets.py` 仍作为独立工具保留，但不再被描述为标签处理主流程的一部分。
+- `tools/cleanup_failed_assets.py` 仍作为独立工具保留，通过 `python -m tools.cleanup_failed_assets` 运行，不属于标签处理主流程。

@@ -4,16 +4,15 @@ import logging
 import httpx
 import pytest
 
-from conftest import FakeImmich, tag
-from immich_tagger.cleanup import EnglishTagCleaner
-from immich_tagger.cleanup_queues import CleanupQueues, QueueMaintenanceError, restore_cleanup_queues
-from immich_tagger.immich_client import ImmichAPIError
-from immich_tagger.progress import ProgressState
-from immich_tagger.main import main, parse_arguments
-from immich_tagger.processor import ImmichAutoTagger
-from immich_tagger.state import writer_lock
-from immich_tagger.task_store import TaskStore
-from test_cleanup import bilingual_asset, paths
+from tests.support.fakes import FakeImmich, tag, bilingual_asset, paths
+from app.english_cleanup import EnglishTagCleaner
+from app.cleanup_queues import CleanupQueues, QueueMaintenanceError, restore_cleanup_queues
+from app.immich_client import ImmichAPIError
+from app.progress import ProgressState
+from app.main import main, parse_arguments
+from app.processor import ImmichAutoTagger
+from app.state import writer_lock
+from app.task_store import TaskStore
 
 
 @pytest.fixture(autouse=True)
@@ -209,8 +208,8 @@ def test_restore_command_needs_no_catalog_or_asset_account_read(settings, monkey
         queue['isPaused'] = True
     worker.close()
     settings.translation_file = settings.state_dir / 'does-not-exist.json'
-    monkeypatch.setattr('immich_tagger.main.Settings', lambda **_: settings)
-    monkeypatch.setattr('immich_tagger.immich_client.ImmichClient', server.factory)
+    monkeypatch.setattr('app.main.Settings', lambda **_: settings)
+    monkeypatch.setattr('app.immich_client.ImmichClient', server.factory)
     assert main(['--restore-cleanup-queues']) == 0
     assert not (settings.state_dir / 'cleanup-queues.json').exists()
     assert all(p.startswith('/api/queues/') for _, p, _ in server.calls)
@@ -249,7 +248,7 @@ def test_lost_pause_response_restores_both_queues_before_any_delete(settings):
 
 def test_cleanup_log_exposes_actual_wait_tag_and_whole_asset_time(settings, monkeypatch, caplog):
     clock = [100.0]
-    monkeypatch.setattr('immich_tagger.progress.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('app.progress.time.monotonic', lambda: clock[0])
     progress = ProgressState(settings)
     progress.phase('processing', '开始清理')
     progress.update(total=1, cleanup_started=100, cleanup_tag='blue_hair', cleanup_index=2,

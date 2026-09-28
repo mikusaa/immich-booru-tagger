@@ -28,7 +28,7 @@ jobs:
             requirements-test.txt
       - run: pip install -r requirements-test.txt
       - run: python -m pytest -q
-      - run: python -m compileall -q immich_tagger
+      - run: python -m compileall -q app tests tools scripts
 
   image:
     needs: test
@@ -72,9 +72,9 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Offline image smoke test
         run: |
-          docker run --rm immich-booru-tagger:check python -m immich_tagger.main --help
+          docker run --rm immich-booru-tagger:check python -m app.main --help
           docker run --rm immich-booru-tagger:check python -c "import wdtagger, torch; assert not torch.cuda.is_available(); print(torch.__version__)"
-          docker run -d --name tagger-smoke --network none -e IMMICH_BASE_URL=http://unused -e IMMICH_API_KEY=test immich-booru-tagger:check python -m immich_tagger.main --mode health-only
+          docker run -d --name tagger-smoke --network none -e IMMICH_BASE_URL=http://unused -e IMMICH_API_KEY=test immich-booru-tagger:check python -m app.main --mode health-only
           trap 'docker logs tagger-smoke; docker rm -f tagger-smoke' EXIT
           for attempt in $(seq 1 20); do
             if docker exec tagger-smoke python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"; then
