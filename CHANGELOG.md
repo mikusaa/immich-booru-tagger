@@ -1,5 +1,20 @@
 # 更新记录
 
+## 1.3.0 — 2026-09-29
+
+新增可配置的图片处理顺序，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.3.0`（Linux AMD64 / CPU）。
+
+- 新增环境变量 `ASSET_SORT_ORDER`，按图片时间 `fileCreatedAt` 控制自动打标和中文补全顺序：`desc`（默认）从新到旧，`asc` 从旧到新，结构化搜索及旧版回退均支持。
+- 切换排序或升级旧版本后，下一次任务执行时重新扫描未完成队列并应用所选顺序；已有完成标记、标签和失败记录保留，无需清空状态目录。
+
+### 升级说明
+
+停止写入任务并备份 `state/`，保留原 `state/` 和 `models/` 挂载。在 `.env` 中将 `TAGGER_IMAGE` 改为 `ghcr.io/mikusaa/immich-booru-tagger:1.3.0`，设置 `ASSET_SORT_ORDER=desc` 从新到旧，或 `ASSET_SORT_ORDER=asc` 保持从旧到新的顺序，然后执行 `docker compose pull` 和 `docker compose up -d`。未设置排序变量时默认从新到旧。
+
+从 `1.2.0` 升级无需迁移其他配置或 SQLite；首次任务会重新扫描候选并重新计算本轮上限。已有完成标记的图片会跳过。英文清理仍须显式执行，并在重新收集候选前恢复队列、核验待复核标签基线。仅调整环境变量时也需重建容器以加载新设置；排序不变的后续重启继续原队列。
+
+本地通过 240 项自动化测试，覆盖环境变量校验、两个排序方向、新旧搜索分页与回退、排序切换和旧队列升级，以及中断续跑与处理上限。
+
 ## 1.2.0 — 2026-09-28
 
 英文清理新增标签基线与续跑保护，程序包名统一为 `app`。镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.2.0`（Linux AMD64 / CPU）。

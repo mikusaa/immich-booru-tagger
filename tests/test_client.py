@@ -23,6 +23,25 @@ def test_pagination_beyond_default_batch_and_manual_tags(settings, legacy, rejec
     assert all(q["orderBy"]["field"] == "fileCreatedAt" for q in queries if "orderBy" in q)
 
 
+@pytest.mark.parametrize("legacy,reject", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_asset_sort_order_across_pages_and_search_fallback(settings, legacy, reject, order):
+    settings.batch_size = 2
+    settings.asset_sort_order = order
+    marker = tag(settings.processed_tag_name)
+    server = FakeImmich([
+        asset(i, fileCreatedAt=f"2026-09-{i:02d}T00:00:00Z", tags=[marker] if i == 5 else [])
+        for i in [2, 5, 1, 4, 3]
+    ], legacy=legacy, reject_structured=reject)
+    with server.factory(settings, settings.get_library_config()[0]) as client:
+        expected = ["1", "2", "3", "4"] if order == "asc" else ["4", "3", "2", "1"]
+        assert [a.id for a in client.iter_assets(processed_tag_id=marker["id"])] == expected
+    queries = [body for method, _, body in server.calls if method == "POST"]
+    assert len(queries) >= 2
+    assert all(q["orderBy"] == {"field": "fileCreatedAt", "direction": order}
+               if "orderBy" in q else q["order"] == order for q in queries)
+
+
 def test_tag_search_batches_deduplicate_before_fetching_details(settings):
     tags = [tag(f"english-{i}") for i in range(101)]
     server = FakeImmich([asset(0, tags=tags), asset(1, tags=[tags[-1]]), asset(2)])

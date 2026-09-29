@@ -36,6 +36,20 @@ def test_invalid_configuration_rejected(settings, values):
         Settings(_env_file=None, immich_base_url="http://test", **values)
 
 
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_asset_sort_order_environment_configuration(settings, monkeypatch, order):
+    monkeypatch.setenv("ASSET_SORT_ORDER", order)
+    parsed = Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+    assert parsed.asset_sort_order == order
+
+
+def test_asset_sort_order_default_and_invalid_environment(settings, monkeypatch):
+    assert settings.asset_sort_order == "desc"
+    monkeypatch.setenv("ASSET_SORT_ORDER", "newest")
+    with pytest.raises(ValidationError, match="asset_sort_order"):
+        Settings(_env_file=None, immich_base_url="http://test", immich_api_key="key")
+
+
 @pytest.mark.parametrize("mode", ["bilingual", "chinese", "english"])
 def test_tag_language_environment_configuration(settings, monkeypatch, mode):
     monkeypatch.setenv("TAG_LANGUAGE_MODE", mode)

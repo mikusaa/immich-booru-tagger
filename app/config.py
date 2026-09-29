@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     immich_include_album_ids: StringList = Field(default_factory=list)
     immich_exclude_library_ids: StringList = Field(default_factory=list)
     search_api: Literal["auto", "structured", "legacy"] = "auto"
+    asset_sort_order: Literal["asc", "desc"] = "desc"
 
     confidence_threshold: float = Field(default=0.35, ge=0, le=1)
     general_threshold: float | None = Field(default=None, ge=0, le=1)

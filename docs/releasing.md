@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Pull Request | 运行测试、构建镜像和离线冒烟测试 | 不发布 |
 | 推送 `main` | 测试通过后发布 | `main`、完整 SHA |
-| 推送 `v1.2.0` | 测试通过后发布正式版本 | `1.2.0`、`1.2`、`latest`、SHA |
+| 推送 `v1.3.0` | 测试通过后发布正式版本 | `1.3.0`、`1.3`、`latest`、SHA |
 | 推送预发布标签 | 发布预发布版本 | 版本标签、SHA，不更新 `latest` |
 | 手动运行 | 对选定分支执行相同流程 | 由元数据规则决定 |
 
@@ -29,9 +29,11 @@ docker build --platform linux/amd64 -t immich-booru-tagger:local .
 
 新增工作流文件不会自动产生镜像，必须等一次对应的 Actions 运行成功后，GHCR 中才会有可拉取的标签。
 
-## 1.2.0
+## 1.3.0
 
-正式版本使用 Git 标签 `v1.2.0`，GHCR 镜像为 `ghcr.io/mikusaa/immich-booru-tagger:1.2.0`。Compose 和 `.env.example` 默认固定该版本。发布内容与升级说明见 [更新记录](../CHANGELOG.md)。
+正式版本使用 Git 标签 `v1.3.0`，GHCR 镜像为 `ghcr.io/mikusaa/immich-booru-tagger:1.3.0`。Compose 和 `.env.example` 默认固定该版本。发布内容与升级说明见 [更新记录](../CHANGELOG.md)。
+
+本版本新增 `ASSET_SORT_ORDER=desc/asc`，默认从新到旧。升级或切换顺序后，下一次任务重新扫描未完成候选；已有完成标记、标签和失败记录保留。排序不变的后续重启继续原队列。
 
 本版本包名为 `app`，入口为 `python -m app.main`。从 `1.1.x` 升级必须同步修改手动命令和自定义脚本，旧镜像使用的 `immich_tagger.main` 不再提供。本地验证使用 `immich-booru-tagger:local`，见 [README](../README.md#从源码构建)。
 

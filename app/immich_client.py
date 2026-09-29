@@ -203,7 +203,7 @@ class ImmichClient:
         if tag_ids:
             filters.setdefault("tagIds", {})["any"] = tag_ids
         query = {"filter": filters, "size": self.settings.batch_size,
-                 "orderBy": {"field": "fileCreatedAt", "direction": "asc"}}
+                 "orderBy": {"field": "fileCreatedAt", "direction": self.settings.asset_sort_order}}
         if cursor:
             query["cursor"] = cursor
         return query
@@ -226,7 +226,7 @@ class ImmichClient:
                 selected_tags = group if tag_ids is not None else None
                 query = self._structured_query(library_id, processed_tag_id, cursor, selected_tags) if structured else {
                     "type": "IMAGE", "size": self.settings.batch_size, "page": page,
-                    "order": "asc", "isOffline": False, "withDeleted": False,
+                    "order": self.settings.asset_sort_order, "isOffline": False, "withDeleted": False,
                 }
                 if not structured:
                     if library_id:

@@ -100,6 +100,8 @@ class ImmichAutoTagger:
         # Explicit allowlist: never serialize credentials or the complete Settings object.
         return fingerprint({
             "pipeline_version": 2, "accounts": [account_scope(s, c.account) for c in self.clients],
+            # Rebuild persisted ordinals when the requested search order changes.
+            "asset_sort_order": s.asset_sort_order,
             "libraries": sorted(s.immich_include_library_ids), "albums": sorted(s.immich_include_album_ids),
             "excluded": sorted(s.immich_exclude_library_ids), "backfill": backfill, "maximum": maximum,
             "model": [s.tagging_model, s.model_repo, str(s.deepdanbooru_project_dir)],

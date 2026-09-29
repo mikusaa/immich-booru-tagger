@@ -16,7 +16,7 @@ from app.processor import ImmichAutoTagger
 from app.progress import ProgressState
 from app.scheduler import Scheduler
 from app.state import writer_lock
-from app.task_store import TaskStore
+from app.task_store import TaskStore, fingerprint
 
 
 def interrupt_after_first(settings, server, **kwargs):
@@ -33,15 +33,17 @@ def interrupt_after_first(settings, server, **kwargs):
     return result
 
 
-def test_resume_skips_scan_and_retains_total_limit(settings):
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_resume_skips_scan_and_retains_total_limit(settings, order):
     settings.batch_size = 2
-    server = FakeImmich([asset(i) for i in range(8)])
+    settings.asset_sort_order = order
+    server = FakeImmich([asset(i, fileCreatedAt=f"2026-09-{i + 1:02d}T00:00:00Z") for i in range(8)])
     assert interrupt_after_first(settings, server, limit=5).processed == 1
     saved = TaskStore.snapshot(settings.state_dir)
     assert saved['progress']['total'] == 5
     assert saved['progress']['remaining'] == 4
     previous_searches = sum(c[0] == 'POST' for c in server.calls)
-    server.assets['new'] = asset('new')
+    server.assets['new'] = asset('new', fileCreatedAt="2026-09-29T00:00:00Z")
     worker = processor(settings, server)
     try:
         assert worker.get_metrics()['last_run']['processed'] == 1
@@ -51,8 +53,41 @@ def test_resume_skips_scan_and_retains_total_limit(settings):
         assert metrics['progress']['session_completed'] == 4
         assert worker.engine.calls == 4
         assert sum(c[0] == 'POST' for c in server.calls) == previous_searches
-        assert not server.assets['5']['tags'] and not server.assets['new']['tags']
+        excluded = '5' if order == 'asc' else '2'
+        assert not server.assets[excluded]['tags'] and not server.assets['new']['tags']
+        downloads = [path for method, path, _ in server.calls if path.endswith('/thumbnail')]
+        expected = [0, 1, 2, 3, 4] if order == 'asc' else [7, 6, 5, 4, 3]
+        assert downloads == [f'/api/assets/{i}/thumbnail' for i in expected]
         assert metrics['progress']['remaining'] == 0
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("previous_order,legacy", [("asc", True), ("asc", False), ("desc", False)])
+def test_sort_order_change_replaces_queue(settings, monkeypatch, previous_order, legacy):
+    server = FakeImmich([asset(i, fileCreatedAt=f"2026-09-{i + 1:02d}T00:00:00Z") for i in range(5)])
+    settings.asset_sort_order = previous_order
+    with monkeypatch.context() as previous_release:
+        if legacy:
+            # Previous releases did not include the search order in their fingerprint.
+            previous_release.setattr('app.processor.fingerprint', lambda values: fingerprint(
+                {key: value for key, value in values.items() if key != 'asset_sort_order'}))
+        assert interrupt_after_first(settings, server, limit=3).processed == 1
+    previous_id = TaskStore.snapshot(settings.state_dir)['progress']['run_id']
+    first = '0' if previous_order == 'asc' else '4'
+    assert server.assets[first]['tags']
+    settings.asset_sort_order = 'desc' if previous_order == 'asc' else 'asc'
+    worker = processor(settings, server)
+    try:
+        assert worker.run(limit=3).processed == 3
+        assert not worker.get_metrics()['progress']['resumed']
+        with TaskStore(settings.state_dir, readonly=True) as store:
+            assert store.get_run(previous_id)['status'] == 'superseded'
+        downloads = [path for method, path, _ in server.calls if path.endswith('/thumbnail')]
+        expected = [0, 4, 3, 2] if previous_order == 'asc' else [4, 0, 1, 2]
+        assert downloads == [f'/api/assets/{i}/thumbnail' for i in expected]
+        excluded = '1' if previous_order == 'asc' else '3'
+        assert not server.assets[excluded]['tags']
     finally:
         worker.close()
 

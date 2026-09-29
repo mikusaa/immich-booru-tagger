@@ -107,6 +107,8 @@ class FakeImmich:
                     items = [item for item in items if any(t["id"] in any_tags for t in item.get("tags") or [])]
                 if all_tags:
                     items = [item for item in items if set(all_tags).issubset({t["id"] for t in item.get("tags") or []})]
+            order = body.get("orderBy", {"field": "fileCreatedAt", "direction": body.get("order", "asc")})
+            items.sort(key=lambda item: item.get(order["field"], ""), reverse=order["direction"] == "desc")
             size = body["size"]
             offset = int(body.get("cursor", 0)) if structured and not self.legacy else (body.get("page", 1) - 1) * size
             page = copy.deepcopy(items[offset:offset + size])

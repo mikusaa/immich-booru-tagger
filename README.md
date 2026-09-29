@@ -1,12 +1,14 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.2.0**。英文清理新增完整标签基线与续跑保护，并逐项等待 XMP 队列排空，减少同图并发写入。程序代码统一放入 `app/`。
+当前稳定版：**1.3.0**。新增 `ASSET_SORT_ORDER` 环境变量，可选择从新到旧或从旧到新处理图片，默认优先最新图片。
 
-**入口变更：** 本文命令适用于 `1.2.0`，使用 `python -m app.main`。从 `1.1.x` 升级需同步修改手动命令和自定义启动脚本；旧镜像仍使用 `python -m immich_tagger.main`。从 `1.0.x` 升级还需迁移语言配置，见下方说明。
+**入口变更：** 本文命令适用于 `1.3.0`，使用 `python -m app.main`。从 `1.1.x` 升级需同步修改手动命令和自定义启动脚本；旧镜像仍使用 `python -m immich_tagger.main`。从 `1.0.x` 升级还需迁移语言配置，见下方说明。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
 它以独立容器运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
+
+在 `.env` 设置 `ASSET_SORT_ORDER=desc`（默认，从新到旧）或 `ASSET_SORT_ORDER=asc`（从旧到新），按图片时间选择打标签的顺序。该配置从 `1.3.0` 开始支持，详见 [排序与处理范围](docs/configuration.md#认证与处理范围)。
 
 默认同时写入英文标签和中文层级标签，可通过 `TAG_LANGUAGE_MODE=chinese` 改为优先中文、缺少译名时使用英文。例如，默认输出：
 
@@ -18,7 +20,7 @@ hatsune_miku
 评级/全年龄
 ```
 
-## 快速开始（稳定版 1.2.0）
+## 快速开始（稳定版 1.3.0）
 
 ### 1. 准备 API Key
 
@@ -49,7 +51,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.2.0` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.3.0` 镜像：
 
 ```bash
 docker compose pull
@@ -155,16 +157,18 @@ docker compose up -d
 
 没有管理员队列权限时，去掉 `--cleanup-maintenance` 使用兼容路径：逐标签至少等待 5 秒，并做两次延迟回读及有限重试。15 个标签即有至少 85 秒固定等待；日志会显示当前标签、本张累计耗时和实际等待阶段。延时只能降低 Immich 异步回写的冲突概率；两种模式都无法阻止清理结束后的外部元数据导入重新添加标签。
 
-## 升级到 1.2.0
+## 升级到 1.3.0
 
-先停止写入任务并备份 `state/`，保留原 `state/` 和 `models/` 挂载。将手动命令从 `python -m immich_tagger.main` 改为 `python -m app.main`，Python 导入从 `immich_tagger` 改为 `app`；旧包入口不再保留，CLI 参数保持兼容。独立资产清理工具改为从源码根目录执行 `python -m tools.cleanup_failed_assets`，运行镜像不包含该工具。
+先停止写入任务并备份 `state/`，保留原 `state/` 和 `models/` 挂载。从 `1.2.0` 升级无需迁移其他配置或 SQLite。默认图片顺序改为从新到旧；希望保持旧顺序时设置 `ASSET_SORT_ORDER=asc`。
 
-从 `1.1.x` 升级无需迁移环境变量或 SQLite。若仍使用 `1.0.x`，还需删除 `.env` 中的 `ENGLISH_TAGS_ENABLED` / `TRANSLATIONS_ENABLED`，按 [迁移对照表](docs/configuration.md#语言配置迁移) 设置 `TAG_LANGUAGE_MODE`。
+从 `1.1.x` 或更早版本升级，将手动命令从 `python -m immich_tagger.main` 改为 `python -m app.main`，Python 导入改为 `app`；独立资产清理工具改为从源码根目录执行 `python -m tools.cleanup_failed_assets`。若仍使用 `1.0.x`，还需删除 `.env` 中的 `ENGLISH_TAGS_ENABLED` / `TRANSLATIONS_ENABLED`，按 [迁移对照表](docs/configuration.md#语言配置迁移) 设置 `TAG_LANGUAGE_MODE`。
 
 在 `.env` 中更新镜像版本：
 
 ```env
-TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.2.0
+TAGGER_IMAGE=ghcr.io/mikusaa/immich-booru-tagger:1.3.0
+# desc 从新到旧；asc 从旧到新
+ASSET_SORT_ORDER=desc
 ```
 
 然后拉取镜像并重建容器：
@@ -174,7 +178,7 @@ docker compose pull
 docker compose up -d
 ```
 
-保留旧语言配置会导致启动报错。`1.1.x` 的配置兼容任务可继续恢复，从 `1.0.x` 升级的未完成任务会重新扫描；英文清理仍须单独执行，不会自动启动。如有 `cleanup-queues.json`，先用新入口执行原维护命令或 `--restore-cleanup-queues`。若旧版已报告保留标签缺失，先排查并恢复标签；升级不会重建事故前没有保存的基线。
+升级后，未完成任务会在下一次执行时按所选顺序重新扫描，并重新计算本轮处理上限；已有完成标记的图片继续跳过，无需清空状态。英文清理仍须单独执行，不会自动启动。如有 `cleanup-queues.json` 或 `cleanup-pending.json`，先恢复队列并核验标签基线。保留旧语言配置会导致启动报错；若旧版已报告保留标签缺失，先排查并恢复标签，升级不会重建事故前没有保存的基线。
 
 ## 常用操作
 
@@ -200,10 +204,10 @@ docker compose run --rm immich-tagger python -m app.main --reset-failures
 仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.2.0
+ghcr.io/mikusaa/immich-booru-tagger:1.3.0
 ```
 
-正式版本使用 Git 标签 `v1.2.0`，对应镜像标签 `1.2.0`；`1.2` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m app.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.3.0`，对应镜像标签 `1.3.0`；`1.3` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m app.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
 
 ## 从源码构建
 
