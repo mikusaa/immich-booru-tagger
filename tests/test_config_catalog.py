@@ -100,6 +100,42 @@ def test_help_without_credentials_or_machine_learning_dependencies(settings, tmp
     assert result.returncode == 0, result.stderr
 
 
+def test_api_only_flows_do_not_import_ml(settings, tmp_path):
+    root = str(Path(__file__).resolve().parents[1])
+    source = """
+import asyncio, sys, tempfile
+from pathlib import Path
+from app.config import Settings
+from app.health_server import HealthServer
+from tests.support.fakes import FakeImmich, asset, tag, processor, bilingual_asset
+with tempfile.TemporaryDirectory() as directory:
+    settings = Settings(_env_file=None, immich_base_url='http://test', immich_api_key='test',
+                        state_dir=Path(directory), tagging_device='mps')
+    server = FakeImmich([asset(0, tags=[tag('blue_hair')])])
+    worker = processor(settings, server)
+    try:
+        health = HealthServer(worker)
+        assert asyncio.run(health.health(None)).status == 200
+        assert asyncio.run(health.metrics(None)).status == 200
+        worker.test_connection()
+        worker.run(backfill=True)
+    finally:
+        worker.close()
+    from app.english_cleanup import EnglishTagCleaner
+    server = FakeImmich([bilingual_asset(1)])
+    cleaner = EnglishTagCleaner(settings, client_factory=server.factory, dry_run=True, cleanup_scope='catalog')
+    try:
+        cleaner.run()
+    finally:
+        cleaner.close()
+assert 'torch' not in sys.modules
+assert 'wdtagger' not in sys.modules
+"""
+    result = subprocess.run([sys.executable, "-c", source], cwd=tmp_path,
+                            env={**os.environ, "PYTHONPATH": root}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_bundled_catalog_and_overrides(settings, tmp_path):
     catalog = TranslationCatalog(settings.translation_file)
     assert len(catalog.tags) > 10000

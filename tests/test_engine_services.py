@@ -12,16 +12,20 @@ from app.health_server import HealthServer
 from app.models import RunResult
 from app.scheduler import Scheduler
 from app.tagging_engine import TaggingEngineError, WD14TaggingEngine
+from tests.support.inference import fake_torch
 
 
 def test_model_adapter_vocabulary_cache_thresholds_and_alpha(settings, tmp_path, monkeypatch):
     labels = tmp_path / "tags.csv"
-    labels.write_text("name,category\ngeneral,9\nblue_hair,0\nhatsune_miku,4\n")
+    labels.write_text("name,category\ngeneral,9\nsensitive,9\nblue_hair,0\nhatsune_miku,4\n")
     captured = {}
     class FakeTagger:
         def __init__(self, **kwargs):
             captured.update(kwargs)
-            self.model = SimpleNamespace(num_classes=3)
+            self._load_model(kwargs["model_repo"], kwargs["cache_dir"])
+
+        def _load_model(self, model_repo, cache_dir):
+            self.model = SimpleNamespace(num_classes=4, forward=lambda _: None)
 
         def tag(self, image, **kwargs):
             captured.update(kwargs)
@@ -35,6 +39,7 @@ def test_model_adapter_vocabulary_cache_thresholds_and_alpha(settings, tmp_path,
         assert kwargs["cache_dir"] == settings.model_cache_dir
         return labels
     monkeypatch.setitem(sys.modules, "wdtagger", SimpleNamespace(Tagger=FakeTagger, LabelData=SimpleNamespace))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch())
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(hf_hub_download=download))
     settings.general_threshold = .5
     settings.character_threshold = .94
@@ -47,15 +52,18 @@ def test_model_adapter_vocabulary_cache_thresholds_and_alpha(settings, tmp_path,
     assert captured["character_threshold"] == .94
     assert captured["cache_dir"] == settings.model_cache_dir
     assert captured["mode"] == "RGBA"
-    assert captured["labels"].character == [2]
+    assert captured["labels"].character == [3]
     assert [(p.name, p.confidence) for p in predictions] == [("hatsune_miku", .96), ("general", .8), ("blue_hair", .7)]
 
 
 def test_bad_model_vocabulary_fails_before_inference(settings, tmp_path, monkeypatch):
     labels = tmp_path / "tags.csv"
     labels.write_text("name,category\ngeneral,9\n")
-    monkeypatch.setitem(sys.modules, "wdtagger", SimpleNamespace(
-        Tagger=lambda **_: SimpleNamespace(model=SimpleNamespace(num_classes=2)), LabelData=SimpleNamespace))
+    class FakeTagger:
+        def __init__(self, **kwargs):
+            self.model = SimpleNamespace(num_classes=2)
+    monkeypatch.setitem(sys.modules, "wdtagger", SimpleNamespace(Tagger=FakeTagger, LabelData=SimpleNamespace))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch())
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(hf_hub_download=lambda *a, **k: labels))
     with pytest.raises(TaggingEngineError, match="vocabulary"):
         WD14TaggingEngine(settings).prepare()

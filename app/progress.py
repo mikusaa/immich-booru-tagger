@@ -19,7 +19,8 @@ OPERATIONS = {"read_tags": "读取账号标签", "read_album": "读取相册成�
               "wait_queues": "等待后台队列完成", "settle_tags": "等待标签异步回写",
               "marker": "写入完成标记",
               "import_model": "加载模型依赖", "load_model": "准备模型（可能检查或下载权重）",
-              "load_labels": "准备模型词表", "catalog": "校验中文词典", "checkpoint": "保存任务进度"}
+              "load_labels": "准备模型词表", "warmup": "模型预热",
+              "catalog": "校验中文词典", "checkpoint": "保存任务进度"}
 
 
 class ProgressState:
@@ -39,7 +40,7 @@ class ProgressState:
                          "scan_skips": {}, "total": None, "completed": 0, "remaining": None,
                          "session_completed": 0, "current_asset_id": None, "operation": None,
                          "last_progress_at": None, "resumed": False, "next_run_at": None,
-                         "processed": 0, "failed": 0, "skipped": 0}
+                         "processed": 0, "failed": 0, "skipped": 0, "inference": None}
             self._session_started = self._phase_started = now
             self._operation_started = None
             self._processing_started = None

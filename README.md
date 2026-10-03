@@ -1,12 +1,12 @@
 # Immich Booru Tagger
 
-当前稳定版：**1.3.0**。新增 `ASSET_SORT_ORDER` 环境变量，可选择从新到旧或从旧到新处理图片，默认优先最新图片。
+当前版本：**1.4.0**，支持 AMD64/ARM64 CPU 镜像和 macOS 原生 MPS 推理。Apple Silicon 用户可双击启动器运行；`1.3.0` 历史镜像仍只有 AMD64。
 
-**入口变更：** 本文命令适用于 `1.3.0`，使用 `python -m app.main`。从 `1.1.x` 升级需同步修改手动命令和自定义启动脚本；旧镜像仍使用 `python -m immich_tagger.main`。从 `1.0.x` 升级还需迁移语言配置，见下方说明。
+**入口变更：** 本文命令适用于 `1.4.0`，使用 `python -m app.main`。从 `1.1.x` 升级需同步修改手动命令和自定义启动脚本；旧镜像仍使用 `python -m immich_tagger.main`。从 `1.0.x` 升级还需迁移语言配置，见下方说明。
 
 给 Immich 图片自动添加 Booru/WD14 标签，并可按离线词典补充中文层级标签。
 
-它以独立容器运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
+它可通过独立容器或 macOS 原生进程运行，通过 Immich 官方 API 读取图片、创建标签并关联到资产，不直接访问 Immich 数据库，也不会修改原图。默认使用 `SmilingWolf/wd-swinv2-tagger-v3`，当前只处理图片。
 
 在 `.env` 设置 `ASSET_SORT_ORDER=desc`（默认，从新到旧）或 `ASSET_SORT_ORDER=asc`（从旧到新），按图片时间选择打标签的顺序。该配置从 `1.3.0` 开始支持，详见 [排序与处理范围](docs/configuration.md#认证与处理范围)。
 
@@ -20,7 +20,13 @@ hatsune_miku
 评级/全年龄
 ```
 
-## 快速开始（稳定版 1.3.0）
+## Mac 原生快速开始
+
+Apple Silicon（M4/M5 等）用户下载源码 ZIP、解压后，双击 **`启动.command`** 即可自动安装环境。按提示填写 Immich 地址、API Key 和处理范围，完成连接检查与少量图片预览，再从菜单开始打标。
+
+以后仍双击这个文件，可续跑、修改配置、开启或关闭登录后定时运行、查看日志。无需手动安装 Python 或编辑 launchd 配置，默认自动选择 MPS。详见 [Mac 原生运行](docs/macos.md)。
+
+## 容器快速开始
 
 ### 1. 准备 API Key
 
@@ -51,7 +57,7 @@ IMMICH_INCLUDE_ALBUM_IDS=00000000-0000-0000-0000-000000000000
 
 `IMMICH_BASE_URL` 不要带 `/api`。图库和相册 ID 必须是 UUID，不是目录名；不设置任何 include 范围时，会处理当前 API 用户可见的全部图片，请谨慎使用。
 
-默认 Compose 固定使用 GHCR 的 `1.3.0` 镜像：
+默认 Compose 固定使用 GHCR 的 `1.4.0` 多架构镜像：
 
 ```bash
 docker compose pull
@@ -157,7 +163,13 @@ docker compose up -d
 
 没有管理员队列权限时，去掉 `--cleanup-maintenance` 使用兼容路径：逐标签至少等待 5 秒，并做两次延迟回读及有限重试。15 个标签即有至少 85 秒固定等待；日志会显示当前标签、本张累计耗时和实际等待阶段。延时只能降低 Immich 异步回写的冲突概率；两种模式都无法阻止清理结束后的外部元数据导入重新添加标签。
 
-## 升级到 1.3.0
+## 升级到 1.4.0
+
+从 `1.3.0` 升级无需迁移 SQLite 或清空模型缓存。停止旧进程，保留 `state/` 和 `models/`，将镜像改为 `ghcr.io/mikusaa/immich-booru-tagger:1.4.0`，拉取并重建。Compose 自动选择 AMD64/ARM64，既有队列可以续跑；切换 `TAGGING_DEVICE` 或 `TAGGING_CPU_THREADS` 不重新扫描。
+
+默认 `TAGGING_DEVICE=auto`：容器使用 CPU，macOS 原生可使用 MPS。强制 `mps/cuda` 但设备不可用，或模型预热/执行失败时，会暂停任务且不增加图片失败次数；改为 `cpu` 后重新运行即可恢复。原生部署与性能验收见 [macOS 文档](docs/macos.md)。
+
+### 从更早版本迁移（1.3.0 历史变更）
 
 先停止写入任务并备份 `state/`，保留原 `state/` 和 `models/` 挂载。从 `1.2.0` 升级无需迁移其他配置或 SQLite。默认图片顺序改为从新到旧；希望保持旧顺序时设置 `ASSET_SORT_ORDER=asc`。
 
@@ -201,20 +213,20 @@ docker compose run --rm immich-tagger python -m app.main --reset-failures
 
 ## 镜像与平台
 
-仓库的 GitHub Actions 会在测试通过后构建并发布 `linux/amd64` CPU 镜像到 GHCR：
+仓库的 GitHub Actions 分别在原生 AMD64/ARM64 runner 上测试和构建，通过后合并为多架构 CPU 镜像：
 
 ```text
-ghcr.io/mikusaa/immich-booru-tagger:1.3.0
+ghcr.io/mikusaa/immich-booru-tagger:1.4.0
 ```
 
-正式版本使用 Git 标签 `v1.3.0`，对应镜像标签 `1.3.0`；`1.3` 和 `latest` 会随对应正式发布更新，`main` 用于开发版。运行 `python -m app.main --version` 或访问服务根路径 `/` 可查询版本。当前没有 ARM64 或 CUDA 构建；需要其他平台请参考 [镜像发布说明](docs/releasing.md) 自行构建。
+正式版本使用 Git 标签 `v1.4.0`，对应镜像标签 `1.4.0`；`1.4` 和 `latest` 随正式发布更新，`main` 用于开发版。运行 `python -m app.main --version` 或访问服务根路径 `/` 可查询版本。默认镜像不包含 CUDA 或 DeepDanbooru；macOS Metal GPU 需要[原生运行](docs/macos.md)。发布前验收范围见[记录](docs/inference-validation.md)。
 
 ## 从源码构建
 
 源码入口为 `python -m app.main`，不再提供 `immich_tagger` 包。先按快速开始准备 `.env`、API Key 和处理范围，再从项目根目录构建本地镜像：
 
 ```bash
-docker build --platform linux/amd64 --target runtime -t immich-booru-tagger:local .
+docker build --target runtime -t immich-booru-tagger:local .
 ```
 
 将 `.env` 中的 `TAGGER_IMAGE` 改为本地镜像名，Compose 才会运行新构建的代码：
@@ -240,6 +252,7 @@ docker compose run --rm immich-tagger python -m app.main --dry-run --limit 20
 - [相对原版的具体改动](docs/upstream-changes.md)
 - [本地开发、测试与词典构建](docs/development.md)
 - [GitHub Actions 与 GHCR 发布](docs/releasing.md)
+- [macOS 原生 MPS、launchd 与本地 benchmark](docs/macos.md)
 - [词典来源与许可](data/NOTICE.md)
 
 ## 常见问题

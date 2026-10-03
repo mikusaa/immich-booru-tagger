@@ -37,6 +37,8 @@ pip install -r requirements.txt
 
 本地 `.env` 应把 `MODEL_CACHE_DIR` 和 `STATE_DIR` 指向可写目录，例如 `models` 和 `state`。不要提交 `.env.local`、模型权重或状态文件。
 
+macOS ARM64 从 PyPI 安装 `requirements.txt`，无需使用 Linux CPU wheel 索引。原生 MPS、launchd 与本地概率/性能对比见 [macOS 文档](macos.md)。离线 CPU 契约检查：`python -m scripts.check_inference_runtime`，使用真实库和随机初始化 SwinV2 权重，不下载模型、不调用 Immich。
+
 ## 测试和容器构建
 
 ```bash
@@ -113,4 +115,4 @@ docker build --target test -t immich-booru-tagger:progress-test .
 python scripts/check_container_restart.py --image immich-booru-tagger:progress-test
 ```
 
-脚本创建临时挂载目录与随机命名的测试容器，分别验证正常停止、强制结束、扫描中断后重建容器续跑；结束时仅清理本次创建的测试资源。实时 `/metrics` 在阻塞期间也会被检查。生产发布仍使用既有 `linux/amd64` runtime 构建及离线模型依赖冒烟检查。
+脚本创建临时挂载目录与随机命名的测试容器，分别验证正常停止、强制结束、扫描中断后重建容器续跑；结束时仅清理本次创建的测试资源。实时 `/metrics` 在阻塞期间也会被检查。发布流程分别在原生 AMD64/ARM64 runner 上构建、测试及执行离线模型依赖冒烟检查，两个架构成功后合并 manifest。实体 MPS 仍需单独验收。

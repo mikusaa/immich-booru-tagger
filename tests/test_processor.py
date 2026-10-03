@@ -5,7 +5,7 @@ import pytest
 from app.processor import ImmichAutoTagger
 from app.models import TagPrediction
 from app.state import writer_lock
-from app.tagging_engine import TaggingEngineError
+from app.tagging_engine import InferenceBackendError, TaggingEngineError
 from tests.support.fakes import FakeEngine, FakeImmich, asset, tag, processor
 
 
@@ -201,6 +201,47 @@ def test_model_loading_error_aborts_without_poisoning_asset_failures(settings):
         assert not server.writes
         assert not worker.failure_tracker(worker.clients[0]).failures
         assert worker.last_error == "No model available"
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("stage", ["warmup", "inference"])
+def test_backend_failure_pauses_and_cpu_resume_keeps_queue_and_failures(settings, stage):
+    class BrokenEngine(FakeEngine):
+        def prepare(self):
+            if stage == "warmup":
+                raise InferenceBackendError("warmup failed")
+            super().prepare()
+        def predict_tags(self, image):
+            if self.calls == 1:
+                raise InferenceBackendError("device lost")
+            return super().predict_tags(image)
+
+    server = FakeImmich([asset(i) for i in range(3)])
+    worker = processor(settings, server, engine=BrokenEngine())
+    try:
+        with pytest.raises(InferenceBackendError):
+            worker.run()
+        run_id = worker.get_metrics()["progress"]["run_id"]
+        assert worker.get_metrics()["progress"]["task_status"] == "paused"
+        assert not worker.failure_tracker(worker.clients[0]).failures
+        assert worker.has_pending_run()
+        completed = 0 if stage == "warmup" else 1
+        assert worker.last_result.attempted == completed
+        searches = len([call for call in server.calls if call[1] == "/api/search/metadata"])
+    finally:
+        worker.close()
+    settings.tagging_device = "cpu"
+    settings.tagging_cpu_threads = 2
+    worker = processor(settings, server)
+    try:
+        result = worker.run()
+        assert result.processed == 3 and result.failed == 0
+        assert worker.get_metrics()["progress"]["run_id"] == run_id
+        assert len([call for call in server.calls if call[1] == "/api/search/metadata"]) == searches
+        assert not worker.failure_tracker(worker.clients[0]).failures
+        for item in server.assets.values():
+            assert [t["value"] for t in item["tags"]].count("auto:processed") == 1
     finally:
         worker.close()
 

@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "runtime": "arm64 3.11.16 2.6.0 True",
+  "isolated_requests": [
+    [
+      "GET",
+      "/api/tags"
+    ],
+    [
+      "GET",
+      "/api/tags"
+    ],
+    [
+      "POST",
+      "/api/search/metadata"
+    ]
+  ],
+  "preinstalled_python_or_uv_required": false,
+  "paths_contain_spaces": true,
+  "second_launch_reused_environment": true,
+  "preview_created_no_task_state": true,
+  "launchd_installed": false
+}

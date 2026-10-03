@@ -13,6 +13,7 @@ from .models import Asset, AssetProcessingResult, RunResult
 from .progress import ProgressState
 from .state import account_scope, record_assignment, writer_lock
 from .task_store import TaskStore, fingerprint
+from .tagging_engine import InferenceBackendError
 from .translation_catalog import TranslationCatalog
 
 
@@ -192,7 +193,7 @@ class ImmichAutoTagger:
             result.success = True
             result.status = "skipped" if backfill and not missing else "processed"
             result.tags_assigned = missing
-        except (StateWriteError, sqlite3.Error):
+        except (StateWriteError, sqlite3.Error, InferenceBackendError):
             # Local durability failures must stop the run, not poison asset failure counts.
             raise
         except Exception as error:

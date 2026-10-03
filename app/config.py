@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     processed_tag_name: str = "auto:processed"
     failure_timeout: int = Field(default=3, ge=0)
     tagging_model: Literal["wd14", "deepdanbooru"] = "wd14"
+    tagging_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
+    tagging_cpu_threads: int | None = Field(default=None, ge=1)
     model_repo: str = "SmilingWolf/wd-swinv2-tagger-v3"
     model_cache_dir: Path = Path("models")
     deepdanbooru_project_dir: Path | None = None

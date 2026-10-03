@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements-test.txt
 COPY app ./app
 COPY data ./data
 COPY tests ./tests
+COPY tools ./tools
+COPY scripts ./scripts
+COPY docs/validation ./docs/validation
 USER appuser
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 
@@ -27,6 +30,7 @@ RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch==2.6.0 tor
     && pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY data ./data
+COPY scripts/check_inference_runtime.py ./scripts/check_inference_runtime.py
 USER appuser
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

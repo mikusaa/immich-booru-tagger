@@ -40,7 +40,7 @@
 
 - 主程序统一放在 `app/`，当前源码入口为 `python -m app.main`；测试辅助代码集中到 `tests/support/`，独立资产清理工具位于 `tools/`。
 - Compose 默认拉取 GHCR 镜像，本地构建通过显式 `docker build` 完成，不会在 `docker compose up` 时隐式构建。
-- 新增 GitHub Actions：PR 运行测试和离线冒烟，`main`/版本标签通过 `GITHUB_TOKEN` 发布 `linux/amd64` 镜像。
+- 新增 GitHub Actions：PR 运行测试和离线冒烟，`main`/版本标签通过 `GITHUB_TOKEN` 发布 AMD64/ARM64 CPU 镜像；macOS ARM64 原生 CPU 契约另行测试。
 - 测试拆分为核心、测试和可选 DeepDanbooru 依赖，新增配置、客户端、处理器和服务测试。
 - README 改为面向使用者的中文上手文档；旧的实现讨论、完整配置、开发说明和 PRD 移入 `docs/`。
 

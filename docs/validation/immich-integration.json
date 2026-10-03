@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "immich_version": "3.2.2",
+  "assets": 4,
+  "preview_planned": 4,
+  "before_interruption_processed": 1,
+  "resumed_processed": 4,
+  "failed": 0,
+  "manual_tags_preserved": true,
+  "idempotent": true,
+  "same_run_id": true,
+  "devices": [
+    "mps",
+    "cpu"
+  ],
+  "base_url": "http://127.0.0.1:32768",
+  "samples": "synthetic",
+  "chip": "Apple M5",
+  "delayed_readback": true
+}

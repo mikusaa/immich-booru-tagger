@@ -52,7 +52,7 @@
 
 ## 非功能要求
 
-- Python 3.11，默认镜像为 `linux/amd64` CPU 版本。
+- Python 3.11，默认镜像为 `linux/amd64`、`linux/arm64` CPU 版本；macOS ARM64 原生支持 WD14 MPS。
 - 请求具备有限重试和退避，避免持续压垮 Immich。
 - API Key 不写入日志和状态文件；账号状态用服务地址与 Key 摘要隔离。
 - 配置错误、词典错误和模型初始化错误应在写入前失败。
@@ -64,7 +64,7 @@
 - 修改 Immich UI 或后端。
 - 自动删除图片或自动回滚标签。
 - 在线翻译服务。
-- ARM64、CUDA 和经过真实验收的 DeepDanbooru 发布镜像。
+- CUDA 和经过真实验收的 DeepDanbooru 发布镜像、Core ML/Neural Engine、量化和批量推理。
 - 在定时任务中删除旧标签，或自动删除全局空标签。
 
 ## 验收标准

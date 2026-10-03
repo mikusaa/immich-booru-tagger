@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import signal
+from pathlib import Path
 
 from .config import Settings
 from . import __version__
@@ -20,6 +21,7 @@ def positive_integer(value):
 def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description="Immich ACG tagging and offline Chinese translations")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--env-file", type=Path, help="Configuration file (default: .env)")
     parser.add_argument("--mode", choices=["single", "continuous", "scheduler", "health-only",
                                           "backfill-zh", "cleanup-english"], default="continuous")
     parser.add_argument("--limit", type=positive_integer, help="Total asset limit across all accounts")
@@ -117,7 +119,9 @@ def main(argv=None):
             overrides["batch_size"] = args.batch_size
         if args.library_id:
             overrides["immich_include_library_ids"] = args.library_id
-        settings = Settings(**overrides)
+        if args.env_file and not args.env_file.is_file():
+            raise ValueError("指定的配置文件不存在")
+        settings = Settings(**overrides, **({"_env_file": args.env_file} if args.env_file else {}))
         secrets = [account["api_key"] for account in settings.get_library_config()]
         if settings.cleanup_admin_api_key:
             secrets.append(settings.cleanup_admin_api_key)

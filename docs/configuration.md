@@ -1,8 +1,8 @@
 # 配置与运行方式
 
-本文补充 README 中的高级配置。所有环境变量都写在 `.env`，Compose 会通过 `env_file` 传入容器。
+本文补充 README 中的高级配置。容器环境变量写在 `.env`，Compose 会通过 `env_file` 传入容器。Mac 双击启动器单独使用 `.env.macos`，日常配置可在菜单修改；高级命令可通过 `python -m app.main --env-file .env.macos ...` 读取同一配置。默认 CLI 仍读取 `.env`，进程环境变量优先于文件。
 
-本文命令适用于 `1.3.0` 镜像及当前源码的 `python -m app.main` 入口。使用 Compose 时请先更新镜像版本，或按 [README 的源码构建步骤](../README.md#从源码构建)选择本地镜像；`1.1.x` 旧镜像仍须使用 `python -m immich_tagger.main`，其余参数相同。
+本文命令适用于 `1.4.0` 镜像及当前源码的 `python -m app.main` 入口。本地镜像可按 [README 的源码构建步骤](../README.md#从源码构建)准备；`1.1.x` 旧镜像仍须使用 `python -m immich_tagger.main`。
 
 ## 认证与处理范围
 
@@ -49,6 +49,8 @@ SEARCH_API=auto
 | `PROCESSED_TAG_NAME` | `auto:processed` | 常规推理成功后的标记 |
 | `FAILURE_TIMEOUT` | `3` | 同一资产失败达到次数后暂停重试；`0` 等同一次失败即暂停 |
 | `TAGGING_MODEL` | `wd14` | `wd14` 或可选的 `deepdanbooru` |
+| `TAGGING_DEVICE` | `auto` | WD14：`auto/cpu/mps/cuda`；auto 按 CUDA → MPS → CPU 的实际可用性选择 |
+| `TAGGING_CPU_THREADS` | 未设置 | 可选正整数；模型准备时调用 PyTorch CPU 线程设置，默认沿用框架设置 |
 | `MODEL_REPO` | `SmilingWolf/wd-swinv2-tagger-v3` | Hugging Face 模型仓库 |
 | `MODEL_CACHE_DIR` | `/app/models` | 模型和词表缓存目录 |
 | `DEEPDANBOORU_PROJECT_DIR` | 空 | DeepDanbooru 项目目录 |
@@ -69,6 +71,8 @@ SEARCH_API=auto
 | `RESUME_ON_STARTUP` | `true` | scheduler 启动时优先恢复配置兼容的未完成任务 |
 
 `BATCH_SIZE` 是搜索分页大小，不代表推理并发数。WD14 的评级标签使用专门阈值，普通标签使用 `GENERAL_THRESHOLD`。
+
+设备在加载模型前确定，FP32 完整预热后才开始处理图片。显式设备不可用、运行时设备错误、输出尺寸异常或非有限数值会暂停任务，不计入图片失败次数，不自动降级 CPU。修改设备为 `cpu` 后可沿原队列续跑；坏图片仍按普通单张失败处理。DeepDanbooru 只允许 `TAGGING_DEVICE=auto`，不承诺 MPS 支持。默认 CPU 容器无法使用 Metal；macOS 原生安装、launchd 与性能对比见 [macOS 文档](macos.md)。
 
 语言模式只控制后续新增标签，不删除已有标签。常规推理仍使用 `PROCESSED_TAG_NAME` 完成标记，并跳过已处理资产；中文优先模式在所有预测都缺少译名时写入英文并标记完成。显式的 `backfill-zh` 和 `cleanup-english` 独立于日常语言模式，始终读取中文词典。
 
@@ -213,11 +217,14 @@ docker compose run --rm immich-tagger python -m app.main --progress-status
 | `current_asset_id` / `operation` | 当前图片及操作代码，如 `search`、`read_details`、`load_model`、`download`、`inference`、`assign_tags`、`remove_tags`、`readback`、`checkpoint` |
 | `phase_elapsed_seconds` / `operation_elapsed_seconds` / `session_elapsed_seconds` | 当前阶段、操作及本次执行耗时，停机时间不计入 |
 | `assets_per_second` | 本次处理阶段完成数除以处理阶段耗时，排除扫描、模型准备和停机时间 |
+| `inference` | 准备前为 `null`；就绪后包含 `device`、`precision`、`cpu_threads`、`model_repo`；设备故障后清空 |
 | `last_progress_at` / `next_run_at` | 最近实际推进时间、下一轮计划时间；定时状态日志不会刷新推进时间 |
 
 `completed` 包含队列中的成功、失败、预览和处理时跳过；扫描阶段被过滤的记录不计入百分比分母。`last_run` 继续保留原有计数语义，`skipped` 还包含扫描时因失败次数达到上限而排除的图片。业务提示中文，接口阶段和操作代码保持英文便于工具使用。模型准备显示步骤与等待时间，不伪造下载百分比。
 
 ## 重启续跑与配置变更
+
+从 `1.3.0` 升级到 `1.4.0` 无数据库迁移。`TAGGING_DEVICE` 与 `TAGGING_CPU_THREADS` 不参与任务签名，切换后继续原队列；仍只允许一个写入进程。
 
 从 `1.2.0` 或更早版本升级到 `1.3.0`，或切换 `ASSET_SORT_ORDER` 后，未完成队列会在下一次任务执行时被替代并按所选顺序重新扫描。已完成的自动打标图片凭完成标记跳过，已有标签和失败记录保留，无需删除 `state/`。替代后的任务重新计算本轮处理上限；英文清理也会重新收集候选，仍先恢复队列并核验待复核标签基线。
 

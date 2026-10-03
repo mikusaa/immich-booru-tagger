@@ -1,5 +1,14 @@
 # 更新记录
 
+## 1.4.0 — 2026-10-03
+
+- 增加 AMD64/ARM64 原生构建及按 digest 合并的多架构 CPU 镜像发布流程；Compose 自动选择宿主架构。
+- WD14 增加 `TAGGING_DEVICE=auto/cpu/mps/cuda`、可选 `TAGGING_CPU_THREADS`、FP32 完整预热与输出校验；macOS 原生支持 MPS。
+- 推理后端故障暂停持久队列，不增加图片失败次数；切换 CPU 可沿原队列恢复。`/health` 与 `/metrics` 展示 `progress.inference`。
+- 增加原生 macOS/launchd 文档、离线真实依赖冒烟检查，以及本地 benchmark、完整概率对比与内存平台期检查。
+- 增加 Mac 双击启动器：自动准备独立 Python 环境、首次配置与连接检查、预览及续跑菜单，并管理登录后定时任务；使用独立 `.env.macos`，保留容器配置。CLI 支持 `--env-file`。
+- 保留原依赖版本、数据库、模型缓存与逐张处理方式。Apple Silicon 发布验收采用 M5 实测证据，CPU/MPS 概率对比、1000 次稳定性及隔离 Immich 集成通过；M4 使用通用路径但尚未单独实测，范围与结果见 [推理验收记录](docs/inference-validation.md)。
+
 ## 1.3.0 — 2026-09-29
 
 新增可配置的图片处理顺序，镜像：`ghcr.io/mikusaa/immich-booru-tagger:1.3.0`（Linux AMD64 / CPU）。

@@ -1,5 +1,5 @@
 -r requirements-core.txt
-# WD14 CPU environment. Optional backends live in separate requirements files.
+# WD14: Linux CPU images and native macOS CPU/MPS. Optional backends are separate.
 torch==2.6.0
 torchvision==0.21.0
 timm==1.0.15
